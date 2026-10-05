@@ -23,8 +23,9 @@ The harness also records latency and chat-template tag leaks.
 ## Workflow
 
 ```bash
-export EVAL_GATEWAY=http://127.0.0.1:3425/v1/chat/completions   # any OpenAI-compatible endpoint
-export EVAL_JUDGE_MODEL=<judge model>  EVAL_GEN_MODEL=<generator model>
+export EVAL_API_KEY=...                       # key for the judge/generator endpoint
+export EVAL_GATEWAY=https://api.openai.com/v1/chat/completions   # any OpenAI-compatible endpoint
+export EVAL_JUDGE_MODEL=gpt-6.1-sol EVAL_GEN_MODEL=gpt-6.1-sol
 
 python gen_evalset.py <path/to/lpm.db> evalset.json         # once; freeze the output
 python run_eval.py    http://localhost:8002 old evalset.json answers.jsonl

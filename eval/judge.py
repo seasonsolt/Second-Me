@@ -18,8 +18,9 @@ import os
 
 import requests
 
-GATEWAY = os.getenv("EVAL_GATEWAY", "http://127.0.0.1:3425/v1/chat/completions")
-JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", "codex/gpt-6.1-sol")
+GATEWAY = os.getenv("EVAL_GATEWAY", "https://api.openai.com/v1/chat/completions")
+HEADERS = {"Authorization": f"Bearer {os.getenv('EVAL_API_KEY', '')}"}
+JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", "gpt-6.1-sol")
 ARTIFACT_RE = re.compile(r"<\|im_(start|end)\|>|<think>|</think>|<answer>|<\|endoftext\|>")
 
 
@@ -27,6 +28,7 @@ def llm_json(prompt: str) -> dict:
     for _ in range(3):
         r = requests.post(
             GATEWAY,
+            headers=HEADERS,
             json={"model": JUDGE_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0},
             timeout=600,
         )

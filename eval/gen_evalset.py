@@ -14,14 +14,16 @@ import os
 
 import requests
 
-GATEWAY = os.getenv("EVAL_GATEWAY", "http://127.0.0.1:3425/v1/chat/completions")
-GEN_MODEL = os.getenv("EVAL_GEN_MODEL", "codex/gpt-6.1-sol")
+GATEWAY = os.getenv("EVAL_GATEWAY", "https://api.openai.com/v1/chat/completions")
+HEADERS = {"Authorization": f"Bearer {os.getenv('EVAL_API_KEY', '')}"}
+GEN_MODEL = os.getenv("EVAL_GEN_MODEL", "gpt-6.1-sol")
 MAX_DOC_CHARS = 24000
 
 
 def llm_json(prompt: str) -> object:
     r = requests.post(
         GATEWAY,
+        headers=HEADERS,
         json={"model": GEN_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2},
         timeout=600,
     )
