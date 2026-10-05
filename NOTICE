@@ -1,0 +1,25 @@
+Second-Me 2026 (community fork)
+Copyright 2026 seasonsolt and contributors
+
+This product is a modified version of Second-Me by Mindverse
+(https://github.com/mindverse/Second-Me), licensed under the Apache License,
+Version 2.0. The original copyright and license notices are retained in
+LICENSE and in the source files.
+
+Modifications made in this fork (relative to upstream commit d0e4025):
+- Base models switched to the Qwen3 family (default Qwen3-1.7B).
+- Apple Silicon training through MLX LoRA, with fuse, GGUF conversion and
+  serving integrated into the existing training pipeline.
+- Factual memory moved to the retrieval layer; L2 training data limited to
+  style, preference and value samples; memory add/update/delete without
+  retraining; embedding collections isolated per model and endpoint.
+- Native chat templates with assistant-only loss; larger inference context
+  with a budget for reference memories.
+- llama.cpp converter and runtime pinned to the same revision; the vendored
+  convert_hf_to_gguf.py was removed in favor of the pinned upstream converter.
+- Reliability fixes: embedding batching, LLM timeouts, GraphRAG exit-code
+  handling, configurable retrieval threshold, MLX cache limit, graphrag
+  package installation.
+- An evaluation harness (eval/) comparing this fork with upstream.
+
+See README.md for details and evaluation results.

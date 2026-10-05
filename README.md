@@ -1,163 +1,130 @@
-![Second Me](https://github.com/mindverse/Second-Me/blob/master/images/cover.png)
+# Second-Me 2026
 
-<div align="center">
-  
-[![Homepage](https://img.shields.io/badge/Second_Me-Homepage-blue?style=flat-square&logo=homebridge)](https://home.second.me/)
-[![AI-native Memory](https://img.shields.io/badge/AI--native_Memory-arXiv-orange?style=flat-square&logo=academia)](https://arxiv.org/abs/2406.18312)
-[![AI-native Memory 2.0](https://img.shields.io/badge/AI--native_Memory_2.0-arXiv-red?style=flat-square&logo=arxiv)](https://arxiv.org/abs/2503.08102)
-[![Discord](https://img.shields.io/badge/Chat-Discord-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/GpWHQNUwrg)
-[![Twitter](https://img.shields.io/badge/Follow-@SecondMe_AI-1DA1F2?style=flat-square&logo=x&logoColor=white)](https://x.com/SecondMe_AI1)
-[![Reddit](https://img.shields.io/badge/Join-Reddit-FF4500?style=flat-square&logo=reddit&logoColor=white)](https://www.reddit.com/r/SecondMeAI/)
-[![View FAQ](https://img.shields.io/badge/FAQ-GitBook-blue?style=flat-square)](https://secondme.gitbook.io/secondme/faq)
+English | [中文](README_zh.md)
 
-</div>
+A **community fork** of [mindverse/Second-Me](https://github.com/mindverse/Second-Me). Not an official release and not affiliated with Mindverse.
 
+Upstream's last substantive update was May 2025. Since then, small models, on-device fine-tuning and agent memory have all moved fast. This fork brings Second-Me in line with 2026 practice:
+- Qwen3 base models.
+- Native MLX training on Apple Silicon.
+- A redesign in which **facts live in a retrieval memory layer and the LoRA only learns to sound like you**.
 
-## Our Vision
+The roadmap below is the backbone of this fork.
 
-Companies like OpenAI built "Super AI" that threatens human independence. We crave individuality: AI that amplifies, not erases, **YOU**.
+> Status: experimental. Phase 1 is done and benchmarked against upstream (see below). Later phases are ordered by priority.
 
-We’re challenging that with "**Second Me**": an open-source prototype where you craft your own **AI self**—a new AI species that preserves you, delivers your context, and defends your interests.
+## Roadmap
 
-It’s **locally trained and hosted**—your data, your control—yet **globally connected**, scaling your intelligence across an AI network. Beyond that, it’s your AI identity interface—a bold standard linking your AI to the world, sparks collaboration among AI selves, and builds tomorrow’s truly native AI apps.
+### Phase 1: Catch up the foundation (✅ done)
 
-Tech enthusiasts, AI pros, domain experts, Join us! Second Me is your launchpad to extend your mind into the digital horizon.
+| Industry practice (2026) | Upstream | This fork |
+|---|---|---|
+| New small-model generation: 1–4B models (Qwen3, Gemma 4) rival last year's 7B | Qwen2.5, default 0.5B | Default Qwen3-1.7B, optional Qwen3-4B-Instruct-2507 |
+| On-device fine-tuning is routine (MLX on Mac, Unsloth on NVIDIA) | CUDA/CPU only; on Mac the Trainer silently picks MPS and leaks memory | macOS arm64 auto-selects MLX LoRA; train → fuse → GGUF → serve, all from the Web UI |
+| Memory and persona are separate: facts in external memory, weights carry style | Facts are trained into the LoRA, so every new memory means retraining | Facts are retrieved; L2 learns style, preferences and values; adding, editing or deleting a memory needs no retraining |
+| Long context with context budgeting | 1024 tokens per request, so retrieved memories don't fit | 8192 context, a token budget for reference memories, and the current question is never truncated |
+| Native chat templates with completion-only loss | ChatML, loss on every token | Native template, assistant-only loss, Qwen3 non-thinking by default |
 
-## Key Features
+### Phase 2: Make the memory layer production-grade (🔜 next, top priority)
 
-### **Train Your AI Self** with AI-Native Memory ([Paper](https://arxiv.org/abs/2503.08102))
-Start training your Second Me today with your own memories! Using Hierarchical Memory Modeling (HMM) and the Me-Alignment Algorithm, your AI self captures your identity, understands your context, and reflects you authentically.
+The evaluation shows the memory layer is now the bottleneck: fact accuracy is 40.6%, and the model invents answers after a fact is deleted.
 
- <p align="center">
-  <img src="https://github.com/user-attachments/assets/a84c6135-26dc-4413-82aa-f4a373c0ff89" width="94%" />
-</p>
+| Direction | Industry practice | Plan |
+|---|---|---|
+| **Atomic facts instead of large text chunks** | Mem0-style systems extract standalone facts from conversations and documents and store each one separately | Today's 4,000-character chunks dilute relevance (top-1 similarity is only 0.52–0.68). Extract facts and embed each one on its own |
+| **Hybrid retrieval and reranking** | Keyword (BM25) plus dense retrieval, then a reranker, is the standard RAG stack | Replace pure dense search with its hard-coded 0.7 threshold, so the threshold no longer has to be calibrated per embedding model |
+| **Temporal memory and conflict resolution** | Temporal knowledge graphs (Zep / Graphiti) keep the newest version of a fact and mark older ones as superseded | Handles updates like "the cat was called Cheese, later renamed Mochi", reusing the GraphRAG entity graph the project already builds |
+| **Learn to say "I don't know"** | Train with "no retrieval hit, so abstain" negatives so the model knows the limits of what it knows | Fix the made-up answers after deletion (currently 0/2) |
+| **Memory consolidation and forgetting** | Agent memory systems periodically merge, compress and retire old memories | Update L1 summaries incrementally instead of rebuilding them from scratch |
 
+### Phase 3: A more faithful persona (📋 mid-term)
 
-### **Scale Your Intelligence** on the Second Me Network
-Launch your AI self from your laptop onto our decentralized network—anyone or any app can connect with your permission, sharing your context as your digital identity.
+| Direction | Industry practice | Plan |
+|---|---|---|
+| Style data in the user's own words | Use text the user actually wrote as style samples, not synthetic "ideal" answers | Remove upstream's hard-coded English; extract real expressions from the user's documents as style samples |
+| Preference optimization | DPO / SimPO / KTO are standard alignment for small models | Bring back upstream's DPO stage (Mac is SFT-only today) with an MLX implementation |
+| Synthetic-data quality control | Score synthetic samples with a judge model and drop weak ones | Automatically score synthesized data and keep only samples that pass |
+| Adapter hot-swap | llama.cpp and MLX both load LoRA adapters at runtime | Memory changes need no retraining; style updates only swap the adapter, with no re-merge or re-conversion |
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/9a74a3f4-d8fd-41c1-8f24-534ed94c842a" width="94%" />
-</p>
+### Phase 4: Join the agent ecosystem (📋 mid-term)
 
+| Direction | Industry practice | Plan |
+|---|---|---|
+| MCP as the standard tool interface | All major agent clients support MCP | Expose "search my memory" and "answer as me" as MCP tools, building on upstream's MCP server |
+| Agent-to-agent protocols | Protocols such as A2A let agents call each other | Replace upstream's network features, which depend on the now-unreachable `app.secondme.io` |
+| Fully local | Embeddings and inference run locally, with no cloud dependency | Default to a local bge-m3 (MLX or Ollama) so personal data stays on the machine |
 
-### Build Tomorrow’s Apps with Second Me
-**Roleplay**: Your AI self switches personas to represent you in different scenarios.  
-**AI Space**: Collaborate with other Second Mes to spark ideas or solve problems.
+### Phase 5: Efficiency and evaluation (📋 ongoing)
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/bc6125c1-c84f-4ecc-b620-8932cc408094" width="94%" />
-</p>
+| Direction | Plan |
+|---|---|
+| Faster training | Larger batches and no gradient checkpointing (peak was only 7.7 GB on M1 Max); expected to cut training time to about a third |
+| Faster data synthesis | 🧪 **Early implementation (experimental)**: configurable synthesis concurrency; a GraphRAG runner that counts cache hits and uses a fixed prompt template (a random template choice was why the cache never hit); timing for every stage. The real speedup has not yet been measured with a cold and warm cache on real data. Next: non-reasoning models, targeting about 1.5 h for the full pipeline instead of about 5 h |
+| Quantized serving | GGUF Q4_K_M and MLX 4-bit to cut latency (style answers currently take about 30 s at the median) |
+| Standard benchmarks | Besides this fork's eval, add long-term-memory benchmarks (LongMemEval, LoCoMo) and persona-consistency evaluation, and run them in CI |
+| Validation coverage | Full Qwen3-4B training, an end-to-end run on real CUDA hardware, and separating the effect of a bigger model from the effect of the new design |
 
-### 100% **Privacy and Control**
-Unlike traditional centralized AI systems, Second Me ensures that your information and intelligence remain local and completely private.
+## Evaluation: 2025 vs 2026 (what Phase 1 delivered)
 
+Upstream and this fork were compared on the same data (10 documents), the same training parameters, the same 59 questions and the same judge model. The harness and method are in [eval/](eval/).
 
+| Metric (retrieval on) | 2025 upstream | 2026 fork | With calibrated threshold: 2025 → 2026 |
+|---|---|---|---|
+| Fact accuracy | 4.7% | 10.9% | 7.8% → **40.6%** |
+| Doesn't invent unknown facts | 10% | **70%** | 10% → 70% |
+| Persona fidelity (1–5) | 1.0 | **2.0** | 1.0 → 1.9 |
+| General answer quality (1–5) | 2.2 | **3.2** | 1.6 → 3.0 |
+| Blind A/B (new wins / losses / ties) | — | **39 / 11 / 7** | 40 / 13 / 4 |
+| Uses added or edited facts without retraining | 0/6 | 0/6 | 3/6 → 3/6 |
+| Chat-template tag leaks | 0 | 0 | 0 |
 
-## Getting started & staying tuned with us
-Star and join us, and you will receive all release notifications from GitHub without any delay!
+**Reading the numbers**
 
+- Most of the gains in not inventing facts and in fact accuracy come from the new memory design. Upstream's 1024-token request window cannot even fit the retrieved memories.
+- A good part of the gains in persona and general quality comes from the larger base model (0.5B → 1.7B). This evaluation cannot separate the two effects.
+- Fact accuracy is still only 40.6%, the model still invents answers after deletion, and persona fidelity is 2/5. That is exactly what Phases 2 and 3 address.
 
- <p align="center">
-  <img src="https://github.com/user-attachments/assets/5c14d956-f931-4c25-b0b3-3c2c96cd7581" width="94%" />
-</p>
+> Note: these scores were measured **before** the pre-release review fixes. At that point the reference-memory budget was counted in bytes (only about 640 characters of three chunks fit into the prompt), chunks were 4,000 characters, and the threshold had to be calibrated by hand. Results should be better after the fixes, but they have not been re-measured yet; a re-run will follow.
 
+**Setup**: Apple M1 Max 64 GB. The 2025 model was Qwen2.5-0.5B, trained on an RTX 4070 Laptop (CUDA); the 2026 model was Qwen3-1.7B, trained with MLX on the M1 Max. `gpt-6.1-sol` did the data synthesis and the judging; embeddings came from Cloudflare `@cf/baai/bge-m3`. The calibrated threshold of 0.5 was picked on the evaluation questions (the midpoint between relevant and irrelevant scores) and applied identically to both versions.
 
-## Quick Start
+## Reliability fixes
 
-### 📊 Model Size vs. Memory (Reference Guide)
+Issues you hit when running the full pipeline, all fixed in this fork:
 
-*Note: "B" in the table represents "billion parameters model". Data shown are examples only; actual supported model sizes may vary depending on system optimization, deployment environment, and other hardware/software conditions.*
+- Embedding requests are batched, since providers cap tokens per request; errors now include the provider's message.
+- L0/L1 LLM timeouts raised from 30/45 s to 180 s to suit reasoning models.
+- GraphRAG success is judged by exit code, so warnings on stderr no longer count as failures.
+- The retrieval threshold is chosen per embedding model (0.5 for bge-m3, otherwise 0.7, which suits OpenAI embeddings) and can be overridden with `L0_SIMILARITY_THRESHOLD` / `L1_SIMILARITY_THRESHOLD`.
+- The reference-memory budget is counted in (approximate) tokens, 4096 of them; chunks went from 4,000 to 1,000 characters. Rebuild existing indexes in one call with `POST /api/documents/reindex`.
+- Training samples over the length limit are skipped and counted instead of failing the whole run; the default limit is 4096.
+- Adding or editing a memory no longer deletes the status biography, and embedding logs no longer include the text.
+- The MLX cache is capped; without a cap it grew to 53 GB on a 64 GB machine.
+- Fixed installation of the bundled graphrag package, which is a zip file named `.tar.gz`.
 
-| Memory (GB) | Docker Deployment (Windows/Linux) | Docker Deployment (Mac) | Integrated Setup (Windows/Linux) | Integrated Setup (Mac) |
-|--------------|-----------------------------|-------------------|--------------------------|----------------|
-| 8            | ~0.8B (example)                | ~0.4B (example)       | ~1.0B (example)              | ~0.6B (example)    |
-| 16           | 1.5B (example)                 | 0.5B (example)        | ~2.0B (example)              | ~0.8B (example)    |
-| 32           | ~2.8B (example)                | ~1.2B (example)       | ~3.5B (example)              | ~1.5B (example)    |
+Design documents: [upgrade plan](docs/2026-upgrade-plan.md), [memory layer and lightweight L2](docs/2026-memory-migration.md), [validation log](docs/2026-upgrade-validation.md).
 
-> **Note**: Models below 0.5B may not provide satisfactory performance for complex tasks. And we're continuously improving cross-platform support - please [submit an issue](https://github.com/mindverse/Second-Me/issues/new) for feedback or compatibility problems on different operating systems.
-
-> **MLX Acceleration**: Mac M-series users can use [MLX](https://github.com/mindverse/Second-Me/tree/master/lpm_kernel/L2/mlx_training) to run larger models (CLI-only).
-
-### ⚡ Get your Second Me running in just 3 steps:
+## Quick start (Apple Silicon)
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/mindverse/Second-Me.git
+git clone https://github.com/seasonsolt/Second-Me.git
 cd Second-Me
-# 2. Start Docker containers
-make docker-up
-# 3. Access the web interface
-# Open your browser and visit: http://localhost:3000
+make setup   # needs an arm64 Python 3.12
+make start
 ```
 
-👉 For detailed instructions — including integrated (non-Docker) setup, model selection, memory requirements, and platform-specific tips,
-check the full [Deployment Guide on GitBook](https://secondme.gitbook.io/secondme/guides/deployment).
+- The training page selects MLX automatically.
+- The retrieval threshold is chosen automatically for the embedding model. If you use something other than OpenAI embeddings or bge-m3, calibrate `L0_SIMILARITY_THRESHOLD` yourself.
+- If you are upgrading data from upstream, call `POST /api/documents/reindex` first to rebuild indexes with the new chunk size.
+- If `python` resolves to an x86 build (`Bad CPU type`), put an arm64 Python 3.12 first on your PATH.
 
-❓ Got questions about setup, models, or any troubleshooting? [Check our FAQ](https://secondme.gitbook.io/secondme/faq).
-
-## Tutorial and Use Cases
-🛠️ Feel free to follow [User tutorial](https://secondme.gitbook.io/secondme/getting-started) to build your Second Me.
-
-💡 Check out the links below to see how Second Me can be used in real-life scenarios:
-- [Felix AMA (Roleplay app)](https://app.secondme.io/example/ama)
-- [Brainstorming a 15-Day European City Itinerary (Network app)](https://app.secondme.io/example/brainstorming)
-- [Icebreaking as a Speed Dating Match (Network app)](https://app.secondme.io/example/Icebreaker)
-
-
-## What's Next: May 2025
-
-Second Me continues to evolve as the open-source identity infrastructure for AI. Here's what's on deck for May:
-
-- 🗂️ **Version Control**: Smarter versioning of memory and identity states  
-- 🧠 **Continuous Training Pipelines**: Keep your AI self evolving over time, with ongoing updates based on new memory inputs.
-- ⚙️ **Performance & Stability Improvements**: Enhancements across inference ability, model alignment,  and base model upgrades
-- ☁️ **Cloud Solutions**: Explore cloud-based solutions for both model training (fine-tuning) and model deployment, to reduce the hardware burden on users' local machines.
+Everything else (Docker deployment, API docs and so on) is the same as upstream; see [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md).
 
 ## Contributing
 
-We’d love for you to help shape what’s coming next — whether it’s fixing bugs, building new features, or improving docs.
+Issues and PRs are welcome, especially for Phase 2. Please include results from [eval/](eval/) with a change, so the data shows whether it helps.
 
-- 📘 Check out our [Contribution Guide](./CONTRIBUTING.md) to get started  
-- 💻 Submit ideas, issues, or PRs on [GitHub](https://github.com/mindverse/Second-Me)  
-- 💬 Join the conversation and stay updated in our [Discord](https://discord.gg/GpWHQNUwrg) — it’s where the community lives
+## Credits and license
 
-
-## Contributors
-
-We would like to express our gratitude to all the individuals who have contributed to Second Me! If you're interested in contributing to the future of intelligence uploading, whether through code, documentation, or ideas, please feel free to submit a pull request to our repository: [Second-Me](https://github.com/Mindverse/Second-Me).
-
-
-<a href="https://github.com/mindverse/Second-Me/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=mindverse/Second-Me" />
-</a>
-
-Made with [contrib.rocks](https://contrib.rocks).
-
-## Acknowledgements
-
-This work leverages the power of the open-source community. 
-
-For data synthesis, we utilized [GraphRAG](https://github.com/microsoft/graphrag) from Microsoft.
-
-For model deployment, we utilized [llama.cpp](https://github.com/ggml-org/llama.cpp), which provides efficient inference capabilities.
-
-Our base models primarily come from the [Qwen2.5](https://huggingface.co/Qwen) series.
-
-We also want to extend our sincere gratitude to all users who have experienced Second Me. We recognize that there is significant room for optimization throughout the entire pipeline, and we are fully committed to iterative improvements to ensure everyone can enjoy the best possible experience locally.
-
-## License
-
-Second Me is open source software licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for more details.
-
-[license]: ./LICENSE
-
-## Star History
-
-<a href="https://www.star-history.com/#mindverse/Second-Me&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mindverse/Second-Me&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mindverse/Second-Me&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mindverse/Second-Me&type=Date" />
- </picture>
-</a>
+- Original project: [mindverse/Second-Me](https://github.com/mindverse/Second-Me); paper: [AI-native Memory 2.0: Second Me](https://arxiv.org/abs/2503.08102).
+- License: Apache License 2.0, same as upstream; see [LICENSE](LICENSE). This fork's changes are summarized in [NOTICE](NOTICE).
