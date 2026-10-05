@@ -2,108 +2,61 @@
 
 English | [中文](README_zh.md)
 
+> **Status: frozen.** This fork brought Second-Me's foundation up to date and is no longer developed. Ongoing work on evidence-grounded digital twins continues in **[twin](https://github.com/seasonsolt/twin)**.
+
 A **community fork** of [mindverse/Second-Me](https://github.com/mindverse/Second-Me). Not an official release and not affiliated with Mindverse.
 
-Upstream's last substantive update was May 2025. Since then, small models, on-device fine-tuning and agent memory have all moved fast. This fork brings Second-Me in line with 2026 practice:
-- Qwen3 base models.
-- Native MLX training on Apple Silicon.
-- A redesign in which **facts live in a retrieval memory layer and the LoRA only learns to sound like you**.
+Upstream's last substantive update was May 2025. This fork caught the foundation up with 2026 practice and showed that the local LoRA fine-tuning architecture runs end to end: synthesize data, train on Apple Silicon, merge, convert to GGUF, serve and chat.
 
-The roadmap below is the backbone of this fork.
+## What changed: catching up the foundation
 
-> Status: experimental. Phase 1 is done and benchmarked against upstream (see below). Later phases are ordered by priority.
-
-## Roadmap
-
-### Phase 1: Catch up the foundation (✅ done)
-
-| Industry practice (2026) | Upstream | This fork |
+| | Upstream (2025) | This fork (2026) |
 |---|---|---|
-| New small-model generation: 1–4B models (Qwen3, Gemma 4) rival last year's 7B | Qwen2.5, default 0.5B | Default Qwen3-1.7B, optional Qwen3-4B-Instruct-2507 |
-| On-device fine-tuning is routine (MLX on Mac, Unsloth on NVIDIA) | CUDA/CPU only; on Mac the Trainer silently picks MPS and leaks memory | macOS arm64 auto-selects MLX LoRA; train → fuse → GGUF → serve, all from the Web UI |
-| Memory and persona are separate: facts in external memory, weights carry style | Facts are trained into the LoRA, so every new memory means retraining | Facts are retrieved; L2 learns style, preferences and values; adding, editing or deleting a memory needs no retraining |
-| Long context with context budgeting | 1024 tokens per request, so retrieved memories don't fit | 8192 context, a token budget for reference memories, and the current question is never truncated |
-| Native chat templates with completion-only loss | ChatML, loss on every token | Native template, assistant-only loss, Qwen3 non-thinking by default |
+| Base model | Qwen2.5-Instruct, default 0.5B | Default **Qwen3-1.7B**, optional Qwen3-4B-Instruct-2507 |
+| Training on a Mac | CUDA/CPU only; on a Mac the Trainer silently picks MPS and leaks memory | macOS arm64 trains with **MLX LoRA** from the Web UI: train → fuse → GGUF → llama-server. CUDA/CPU keep the PyTorch path |
+| Memory | Facts trained into the LoRA, so every new memory means retraining | Facts come from retrieval and the LoRA learns style; adding, editing or deleting a memory needs no retraining |
+| Context | 1024 tokens per request, so retrieved memories don't fit | 8192 tokens with a budget for reference memories |
+| Chat template | ChatML, loss on every token | Native template, assistant-only loss, Qwen3 non-thinking |
+| Retrieval threshold | Fixed at 0.7 (suits only OpenAI embeddings; retrieves nothing with bge-m3) | Chosen per embedding model, overridable with `L0_SIMILARITY_THRESHOLD` |
+| llama.cpp | Bundled old build | Converter and runtime pinned to one revision; GPU builds on native Linux (CUDA or Vulkan) |
 
-### Phase 2: Make the memory layer production-grade (🔜 next, top priority)
+### Proof that the LoRA architecture runs
 
-The evaluation shows the memory layer works (78.1% fact accuracy) but is still the bottleneck: one in five facts is missed, the model invents answers after a fact is deleted, and retrieval depends on a per-model threshold.
+- **Training**: Qwen3-1.7B, MLX LoRA on an Apple M1 Max, 549 iterations over 183 training samples (61 held out). Validation loss fell from 3.71 to 2.24.
+- **Serving**: the fused model was converted to GGUF and served by llama.cpp (Metal on the Mac, Vulkan on Linux with an RTX 4070 Laptop) behind the Web UI.
+- **Reliability fixes** found on that real run: embedding batching, LLM timeouts, GraphRAG exit-code handling, the MLX cache limit, the graphrag package install, and a production-build crash in the Web UI.
 
-| Direction | Industry practice | Plan |
-|---|---|---|
-| **Atomic facts instead of large text chunks** | Mem0-style systems extract standalone facts from conversations and documents and store each one separately | Today's 4,000-character chunks dilute relevance (top-1 similarity is only 0.52–0.68). Extract facts and embed each one on its own |
-| **Hybrid retrieval and reranking** | Keyword (BM25) plus dense retrieval, then a reranker, is the standard RAG stack | Replace pure dense search with its hard-coded 0.7 threshold, so the threshold no longer has to be calibrated per embedding model |
-| **Temporal memory and conflict resolution** | Temporal knowledge graphs (Zep / Graphiti) keep the newest version of a fact and mark older ones as superseded | Handles updates like "the cat was called Cheese, later renamed Mochi", reusing the GraphRAG entity graph the project already builds |
-| **Learn to say "I don't know"** | Train with "no retrieval hit, so abstain" negatives so the model knows the limits of what it knows | Fix the made-up answers after deletion (currently 0/2) |
-| **Memory consolidation and forgetting** | Agent memory systems periodically merge, compress and retire old memories | Update L1 summaries incrementally instead of rebuilding them from scratch |
+## Evaluation: Second-Me 2025 vs Second-Me 2026 vs twin
 
-### Phase 3: A more faithful persona (📋 mid-term)
+All three systems answered the same 57 questions about one person, built from the same 10 documents, and were scored by the same judge.
 
-| Direction | Industry practice | Plan |
-|---|---|---|
-| Style data in the user's own words | Use text the user actually wrote as style samples, not synthetic "ideal" answers | Remove upstream's hard-coded English; extract real expressions from the user's documents as style samples |
-| Preference optimization | DPO / SimPO / KTO are standard alignment for small models | Bring back upstream's DPO stage (Mac is SFT-only today) with an MLX implementation |
-| Synthetic-data quality control | Score synthetic samples with a judge model and drop weak ones | Automatically score synthesized data and keep only samples that pass |
-| Adapter hot-swap | llama.cpp and MLX both load LoRA adapters at runtime | Memory changes need no retraining; style updates only swap the adapter, with no re-merge or re-conversion |
+| Metric | Second-Me 2025 | Second-Me 2026 | twin |
+|---|---|---|---|
+| Fact accuracy | 6.2% | 68.8% | **98.4%** |
+| Doesn't invent unknown facts | 10% | 80% | **100%** |
+| Persona fidelity (1–5) | 1.0 | 1.9 | **3.9** |
+| General-question quality (1–5) | 2.2 | **3.0** | 2.0 |
+| Median latency, fact questions | 2.2 s | 4.3 s | 7.8 s |
 
-### Phase 4: Join the agent ecosystem (📋 mid-term)
-
-| Direction | Industry practice | Plan |
-|---|---|---|
-| MCP as the standard tool interface | All major agent clients support MCP | Expose "search my memory" and "answer as me" as MCP tools, building on upstream's MCP server |
-| Agent-to-agent protocols | Protocols such as A2A let agents call each other | Replace upstream's network features, which depend on the now-unreachable `app.secondme.io` |
-| Fully local | Embeddings and inference run locally, with no cloud dependency | Default to a local bge-m3 (MLX or Ollama) so personal data stays on the machine |
-
-### Phase 5: Efficiency and evaluation (📋 ongoing)
-
-| Direction | Plan |
-|---|---|
-| Faster training | Larger batches and no gradient checkpointing (peak was only 7.7 GB on M1 Max); expected to cut training time to about a third |
-| Faster data synthesis | 🧪 **Early implementation (experimental)**: configurable synthesis concurrency; a GraphRAG runner that counts cache hits and uses a fixed prompt template (a random template choice was why the cache never hit); timing for every stage. The real speedup has not yet been measured with a cold and warm cache on real data. Next: non-reasoning models, targeting about 1.5 h for the full pipeline instead of about 5 h |
-| Quantized serving | GGUF Q4_K_M and MLX 4-bit to cut latency (style answers currently take about 18 s at the median) |
-| Standard benchmarks | Besides this fork's eval, add long-term-memory benchmarks (LongMemEval, LoCoMo) and persona-consistency evaluation, and run them in CI |
-| Validation coverage | Full Qwen3-4B training, an end-to-end run on real CUDA hardware, and separating the effect of a bigger model from the effect of the new design |
-
-## Evaluation: 2025 vs 2026 (what Phase 1 delivered)
-
-Upstream and this fork were compared on the same data (10 documents), the same training parameters, the same 59 questions and the same judge model. Upstream ran as shipped. The harness and method are in [eval/](eval/).
-
-| Metric (retrieval on) | 2025 upstream | 2026 this fork |
-|---|---|---|
-| Fact accuracy | 4.7% | **78.1%** |
-| Doesn't invent unknown facts | 10% | **70%** |
-| Persona fidelity (1–5) | 1.0 | **2.2** |
-| General answer quality (1–5) | 2.2 | **3.2** |
-| Blind A/B (new wins / losses / ties) | — | **52 / 9 / 2** |
-| Memory updates without retraining (6 checks: add, edit, delete × 2) | 0 | **3.5** (add 2/2, edit 1.5/2, delete 0/2) |
-| Chat-template tag leaks | 0 | 0 |
-| Median latency: fact / style questions | 2.2 s / 14.5 s | 4.3 s / 18.3 s |
+Question mix: 32 fact questions from the documents, 10 questions the memory cannot answer, 10 open style questions and 5 general questions.
 
 **Reading the numbers**
 
-- Facts come from the memory layer, not the weights. With retrieval off, the fork answers only 12.5% of fact questions, which is intended: the LoRA learns style, not facts.
-- The pre-release review fixes alone took fact accuracy from 40.6% to 78.1% on the **same trained model**: a token-based reference budget instead of a byte-based one, 1,000-character chunks instead of 4,000, and a per-embedding-model threshold. Before those fixes, the default 0.7 threshold retrieved nothing with bge-m3, so the shipped pre-fix code scored 10.9%.
-- A good part of the gains in persona and general quality comes from the larger base model (0.5B → 1.7B). This evaluation cannot separate the two effects.
-- Still open: the model invents an answer after a fact is deleted (0/2), and persona fidelity is only 2.2/5. Phases 2 and 3 address these.
+- **2025 → 2026** isolates what this fork changed. Both run locally on llama.cpp with a small fine-tuned model (Qwen2.5-0.5B upstream, Qwen3-1.7B here), so part of the gain comes from the larger base model.
+- **twin** answers with a large cloud model (`gpt-6.1-sol`), so it is not a like-for-like comparison with a local 1.7B model. Its lead also reflects its design: every fact is tied to quoted evidence, confidence is computed by the system rather than the model, and it abstains when the evidence is missing.
+- twin only answers as the person, from the person's material: it declines general questions it has no material on (for example "compare Kafka and RabbitMQ"), which is why it scores lowest there.
 
-**Setup**: Apple M1 Max 64 GB. The 2025 model was Qwen2.5-0.5B, trained on an RTX 4070 Laptop (CUDA); the 2026 model was Qwen3-1.7B, trained with MLX on the M1 Max. `gpt-6.1-sol` did the data synthesis and the judging; embeddings came from Cloudflare `@cf/baai/bge-m3`.
+**Setup and limits**
 
-## Reliability fixes
+- The judge was `claude-sonnet-5-5`, a different model family from every answering model. The questions were generated by `gpt-6.1-sol`, the same family twin answers with, which may favour twin slightly.
+- Single run, 57 questions, one person's private documents. The question set and answers are not published; the harness is in [eval/](eval/).
+- Second-Me runs: Qwen2.5-0.5B (2025, trained on an RTX 4070 Laptop) and Qwen3-1.7B (2026, trained with MLX on an M1 Max); embeddings `@cf/baai/bge-m3`. twin ran its pre-release code unmodified, with the same embeddings.
 
-Issues you hit when running the full pipeline, all fixed in this fork:
+## Why this fork is frozen
 
-- Embedding requests are batched, since providers cap tokens per request; errors now include the provider's message.
-- L0/L1 LLM timeouts raised from 30/45 s to 180 s to suit reasoning models.
-- GraphRAG success is judged by exit code, so warnings on stderr no longer count as failures.
-- The retrieval threshold is chosen per embedding model (0.5 for bge-m3, otherwise 0.7, which suits OpenAI embeddings) and can be overridden with `L0_SIMILARITY_THRESHOLD` / `L1_SIMILARITY_THRESHOLD`.
-- The reference-memory budget is counted in (approximate) tokens, 4096 of them; chunks went from 4,000 to 1,000 characters. Rebuild existing indexes in one call with `POST /api/documents/reindex`.
-- Training samples over the length limit are skipped and counted instead of failing the whole run; the default limit is 4096.
-- Adding or editing a memory no longer deletes the status biography, and embedding logs no longer include the text.
-- Native Linux builds llama.cpp for the GPU (CUDA if `nvcc` exists, otherwise Vulkan) instead of always for the CPU.
-- The MLX cache is capped; without a cap it grew to 53 GB on a 64 GB machine.
-- Fixed installation of the bundled graphrag package, which is a zip file named `.tar.gz`.
+The comparison shows where the remaining gains are: evidence, dates, citations and calibrated abstention in the answering runtime, plus a more rigorous evaluation method with baselines and confidence intervals. Those are the focus of **[twin](https://github.com/seasonsolt/twin)**, so new development continues there rather than in this codebase.
 
-Design documents: [upgrade plan](docs/2026-upgrade-plan.md), [memory layer and lightweight L2](docs/2026-memory-migration.md), [validation log](docs/2026-upgrade-validation.md).
+This repository stays available as a working, local-first Second-Me with Qwen3 and MLX training. Issues and fixes for the current release are still welcome.
 
 ## Quick start (Apple Silicon)
 
@@ -115,15 +68,10 @@ make start
 ```
 
 - The training page selects MLX automatically.
-- The retrieval threshold is chosen automatically for the embedding model. If you use something other than OpenAI embeddings or bge-m3, calibrate `L0_SIMILARITY_THRESHOLD` yourself.
-- If you are upgrading data from upstream, call `POST /api/documents/reindex` first to rebuild indexes with the new chunk size.
+- The retrieval threshold is chosen for your embedding model; for models other than OpenAI embeddings or bge-m3, calibrate `L0_SIMILARITY_THRESHOLD`.
 - If `python` resolves to an x86 build (`Bad CPU type`), put an arm64 Python 3.12 first on your PATH.
 
-Everything else (Docker deployment, API docs and so on) is the same as upstream; see [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md).
-
-## Contributing
-
-Issues and PRs are welcome, especially for Phase 2. Please include results from [eval/](eval/) with a change, so the data shows whether it helps.
+Design notes: [upgrade plan](docs/2026-upgrade-plan.md), [memory layer and lightweight L2](docs/2026-memory-migration.md), [validation log](docs/2026-upgrade-validation.md). Everything else works as upstream: [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md).
 
 ## Credits and license
 
