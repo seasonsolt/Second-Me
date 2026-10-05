@@ -27,7 +27,7 @@ The roadmap below is the backbone of this fork.
 
 ### Phase 2: Make the memory layer production-grade (🔜 next, top priority)
 
-The evaluation shows the memory layer is now the bottleneck: fact accuracy is 40.6%, and the model invents answers after a fact is deleted.
+The evaluation shows the memory layer works (78.1% fact accuracy) but is still the bottleneck: one in five facts is missed, the model invents answers after a fact is deleted, and retrieval depends on a per-model threshold.
 
 | Direction | Industry practice | Plan |
 |---|---|---|
@@ -60,33 +60,33 @@ The evaluation shows the memory layer is now the bottleneck: fact accuracy is 40
 |---|---|
 | Faster training | Larger batches and no gradient checkpointing (peak was only 7.7 GB on M1 Max); expected to cut training time to about a third |
 | Faster data synthesis | 🧪 **Early implementation (experimental)**: configurable synthesis concurrency; a GraphRAG runner that counts cache hits and uses a fixed prompt template (a random template choice was why the cache never hit); timing for every stage. The real speedup has not yet been measured with a cold and warm cache on real data. Next: non-reasoning models, targeting about 1.5 h for the full pipeline instead of about 5 h |
-| Quantized serving | GGUF Q4_K_M and MLX 4-bit to cut latency (style answers currently take about 30 s at the median) |
+| Quantized serving | GGUF Q4_K_M and MLX 4-bit to cut latency (style answers currently take about 18 s at the median) |
 | Standard benchmarks | Besides this fork's eval, add long-term-memory benchmarks (LongMemEval, LoCoMo) and persona-consistency evaluation, and run them in CI |
 | Validation coverage | Full Qwen3-4B training, an end-to-end run on real CUDA hardware, and separating the effect of a bigger model from the effect of the new design |
 
 ## Evaluation: 2025 vs 2026 (what Phase 1 delivered)
 
-Upstream and this fork were compared on the same data (10 documents), the same training parameters, the same 59 questions and the same judge model. The harness and method are in [eval/](eval/).
+Upstream and this fork were compared on the same data (10 documents), the same training parameters, the same 59 questions and the same judge model. Upstream ran as shipped. The harness and method are in [eval/](eval/).
 
-| Metric (retrieval on) | 2025 upstream | 2026 fork | With calibrated threshold: 2025 → 2026 |
-|---|---|---|---|
-| Fact accuracy | 4.7% | 10.9% | 7.8% → **40.6%** |
-| Doesn't invent unknown facts | 10% | **70%** | 10% → 70% |
-| Persona fidelity (1–5) | 1.0 | **2.0** | 1.0 → 1.9 |
-| General answer quality (1–5) | 2.2 | **3.2** | 1.6 → 3.0 |
-| Blind A/B (new wins / losses / ties) | — | **39 / 11 / 7** | 40 / 13 / 4 |
-| Uses added or edited facts without retraining | 0/6 | 0/6 | 3/6 → 3/6 |
-| Chat-template tag leaks | 0 | 0 | 0 |
+| Metric (retrieval on) | 2025 upstream | 2026 this fork |
+|---|---|---|
+| Fact accuracy | 4.7% | **78.1%** |
+| Doesn't invent unknown facts | 10% | **70%** |
+| Persona fidelity (1–5) | 1.0 | **2.2** |
+| General answer quality (1–5) | 2.2 | **3.2** |
+| Blind A/B (new wins / losses / ties) | — | **52 / 9 / 2** |
+| Memory updates without retraining (6 checks: add, edit, delete × 2) | 0 | **3.5** (add 2/2, edit 1.5/2, delete 0/2) |
+| Chat-template tag leaks | 0 | 0 |
+| Median latency: fact / style questions | 2.2 s / 14.5 s | 4.3 s / 18.3 s |
 
 **Reading the numbers**
 
-- Most of the gains in not inventing facts and in fact accuracy come from the new memory design. Upstream's 1024-token request window cannot even fit the retrieved memories.
+- Facts come from the memory layer, not the weights. With retrieval off, the fork answers only 12.5% of fact questions, which is intended: the LoRA learns style, not facts.
+- The pre-release review fixes alone took fact accuracy from 40.6% to 78.1% on the **same trained model**: a token-based reference budget instead of a byte-based one, 1,000-character chunks instead of 4,000, and a per-embedding-model threshold. Before those fixes, the default 0.7 threshold retrieved nothing with bge-m3, so the shipped pre-fix code scored 10.9%.
 - A good part of the gains in persona and general quality comes from the larger base model (0.5B → 1.7B). This evaluation cannot separate the two effects.
-- Fact accuracy is still only 40.6%, the model still invents answers after deletion, and persona fidelity is 2/5. That is exactly what Phases 2 and 3 address.
+- Still open: the model invents an answer after a fact is deleted (0/2), and persona fidelity is only 2.2/5. Phases 2 and 3 address these.
 
-> Note: these scores were measured **before** the pre-release review fixes. At that point the reference-memory budget was counted in bytes (only about 640 characters of three chunks fit into the prompt), chunks were 4,000 characters, and the threshold had to be calibrated by hand. Results should be better after the fixes, but they have not been re-measured yet; a re-run will follow.
-
-**Setup**: Apple M1 Max 64 GB. The 2025 model was Qwen2.5-0.5B, trained on an RTX 4070 Laptop (CUDA); the 2026 model was Qwen3-1.7B, trained with MLX on the M1 Max. `gpt-6.1-sol` did the data synthesis and the judging; embeddings came from Cloudflare `@cf/baai/bge-m3`. The calibrated threshold of 0.5 was picked on the evaluation questions (the midpoint between relevant and irrelevant scores) and applied identically to both versions.
+**Setup**: Apple M1 Max 64 GB. The 2025 model was Qwen2.5-0.5B, trained on an RTX 4070 Laptop (CUDA); the 2026 model was Qwen3-1.7B, trained with MLX on the M1 Max. `gpt-6.1-sol` did the data synthesis and the judging; embeddings came from Cloudflare `@cf/baai/bge-m3`.
 
 ## Reliability fixes
 
@@ -99,6 +99,7 @@ Issues you hit when running the full pipeline, all fixed in this fork:
 - The reference-memory budget is counted in (approximate) tokens, 4096 of them; chunks went from 4,000 to 1,000 characters. Rebuild existing indexes in one call with `POST /api/documents/reindex`.
 - Training samples over the length limit are skipped and counted instead of failing the whole run; the default limit is 4096.
 - Adding or editing a memory no longer deletes the status biography, and embedding logs no longer include the text.
+- Native Linux builds llama.cpp for the GPU (CUDA if `nvcc` exists, otherwise Vulkan) instead of always for the CPU.
 - The MLX cache is capped; without a cap it grew to 53 GB on a 64 GB machine.
 - Fixed installation of the bundled graphrag package, which is a zip file named `.tar.gz`.
 
