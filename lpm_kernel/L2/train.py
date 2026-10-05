@@ -21,12 +21,11 @@ from peft import LoraConfig
 from tqdm import tqdm
 from transformers import HfArgumentParser, TrainingArguments, set_seed
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer, SFTConfig
 
 # Local imports
 from lpm_kernel.L2.utils import (
     create_and_prepare_model,
-    formatting_prompts_func,
     create_chat_data,
     release_ollama_models_early,
 )
@@ -197,6 +196,7 @@ def main(model_args, data_args, training_args):
         release_ollama_models_early()
     
     logger.info("Initializing training with memory optimizations")
+    training_args.use_cpu = not (model_args.use_cuda and torch.cuda.is_available())
     set_seed(training_args.seed)
     
     # Apply PyTorch memory optimizations to training arguments
@@ -297,14 +297,18 @@ def main(model_args, data_args, training_args):
         tokenizer,
     )
     
-    response_template = "\n<|im_start|>assistant\n"
-    
-    collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
-    
-    training_args.dataset_kwargs = {
-        "append_concat_token": data_args.append_concat_token,
-        "add_special_tokens": data_args.add_special_tokens,
-    }
+    # Right truncation must not remove every supervised token.
+    max_length = training_args.max_length
+    if max_length:
+        original_count = len(train_dataset)
+        train_dataset = train_dataset.filter(
+            lambda row: len(tokenizer(row["prompt"], add_special_tokens=False)["input_ids"]) < max_length
+        )
+        logger.info("Kept %s/%s samples with completion tokens inside max_length", len(train_dataset), original_count)
+        if not len(train_dataset):
+            raise ValueError("All prompts exceed max_length; increase it or shorten reference/history text")
+    training_args.completion_only_loss = True
+    training_args.dataset_kwargs = {"add_special_tokens": False}
 
     # Use DeepSpeed to handle meta tensors if available
     try:
@@ -347,12 +351,10 @@ def main(model_args, data_args, training_args):
 
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
         peft_config=peft_config,
-        formatting_func=formatting_prompts_func,
-        data_collator=collator,
     )
     
     # Print model details

@@ -2,14 +2,11 @@
 Advanced prompt strategies for multi-phase chat processing
 """
 import logging
-from typing import Optional
+from typing import Optional, Any
 
 from lpm_kernel.api.domains.kernel2.dto.chat_dto import ChatRequest
-from lpm_kernel.api.domains.kernel2.services.prompt_builder import SystemPromptStrategy
-from lpm_kernel.api.domains.kernel2.services.knowledge_service import (
-    default_retriever,
-    default_l1_retriever,
-)
+from lpm_kernel.api.domains.kernel2.services.prompt_builder import SystemPromptStrategy, KnowledgeEnhancedStrategy
+
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +15,7 @@ class RequirementEnhancementStrategy(SystemPromptStrategy):
     def __init__(self, base_strategy: SystemPromptStrategy):
         self.base_strategy = base_strategy
 
-    def build_prompt(self, request: ChatRequest) -> str:
+    def build_prompt(self, request: ChatRequest, context: Optional[Any] = None) -> str:
         prompt = """
         You are a requirement analyst. Your task is to enhance and complete the given rough requirement.
         Consider the following:
@@ -28,28 +25,14 @@ class RequirementEnhancementStrategy(SystemPromptStrategy):
         4. Incorporate the provided context and knowledge
         """
         
-        # Add knowledge retrieval results if enabled
-        knowledge_sections = []
-        
-        if request.enable_l0_retrieval:
-            l0_knowledge = default_retriever.retrieve(request.message)
-            if l0_knowledge:
-                knowledge_sections.append(f"Reference knowledge:\n{l0_knowledge}")
-                
-        if request.enable_l1_retrieval:
-            l1_knowledge = default_l1_retriever.retrieve(request.message)
-            if l1_knowledge:
-                knowledge_sections.append(f"Reference shades:\n{l1_knowledge}")
-                
-        if knowledge_sections:
-            prompt += "\n\nKnowledge context:\n" + "\n\n".join(knowledge_sections)
-            
-        base_prompt = self.base_strategy.build_prompt(request)
+        base_prompt = self.base_strategy.build_prompt(request, context)
         if base_prompt:
             prompt = f"{base_prompt}\n\n{prompt}"
-            
-        logger.info(f"RequirementEnhancementStrategy prompt: {prompt}")
-        return prompt
+        class RequirementPrompt(SystemPromptStrategy):
+            def build_prompt(self, request, context=None):
+                return prompt
+        return KnowledgeEnhancedStrategy(RequirementPrompt()).build_prompt(request, context)
+
 
 
 class ExpertSolutionStrategy(SystemPromptStrategy):
@@ -57,7 +40,7 @@ class ExpertSolutionStrategy(SystemPromptStrategy):
     def __init__(self, base_strategy: SystemPromptStrategy):
         self.base_strategy = base_strategy
 
-    def build_prompt(self, request: ChatRequest) -> str:
+    def build_prompt(self, request: ChatRequest, context: Optional[Any] = None) -> str:
         prompt = """
         You are an expert system designed to generate solutions based on specific requirements.
         Generate a detailed solution that meets all aspects of the requirement.
@@ -68,7 +51,6 @@ class ExpertSolutionStrategy(SystemPromptStrategy):
         if base_prompt:
             prompt = f"{base_prompt}\n\n{prompt}"
             
-        logger.info(f"ExpertSolutionStrategy prompt: {prompt}")
         return prompt
 
 
@@ -77,7 +59,7 @@ class SolutionValidatorStrategy(SystemPromptStrategy):
     def __init__(self, base_strategy: SystemPromptStrategy):
         self.base_strategy = base_strategy
 
-    def build_prompt(self, request: ChatRequest) -> str:
+    def build_prompt(self, request: ChatRequest, context: Optional[Any] = None) -> str:
         prompt = """
         You are a solution validator. Your task is to validate if the given solution meets all requirements.
         You must return a JSON response in the following format:
@@ -91,7 +73,6 @@ class SolutionValidatorStrategy(SystemPromptStrategy):
         if base_prompt:
             prompt = f"{base_prompt}\n\n{prompt}"
             
-        logger.info(f"SolutionValidatorStrategy prompt: {prompt}")
         return prompt
 
 
@@ -100,7 +81,7 @@ class SolutionFormatterStrategy(SystemPromptStrategy):
     def __init__(self, base_strategy: SystemPromptStrategy):
         self.base_strategy = base_strategy
 
-    def build_prompt(self, request: ChatRequest) -> str:
+    def build_prompt(self, request: ChatRequest, context: Optional[Any] = None) -> str:
         prompt = """
         You are a solution formatter. Your task is to format the given solution to be clear and well-structured.
         Improve readability while maintaining all technical details.
@@ -110,5 +91,4 @@ class SolutionFormatterStrategy(SystemPromptStrategy):
         if base_prompt:
             prompt = f"{base_prompt}\n\n{prompt}"
             
-        logger.info(f"SolutionFormatterStrategy prompt: {prompt}")
         return prompt

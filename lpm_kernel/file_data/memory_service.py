@@ -1,7 +1,5 @@
 from pathlib import Path
 import os
-import uuid
-from datetime import datetime
 from lpm_kernel.common.logging import logger
 from lpm_kernel.models.memory import Memory
 from lpm_kernel.common.repository.database_session import DatabaseSession
@@ -54,17 +52,17 @@ class StorageService:
         with db._session_factory() as session:
             # find record with same file name and size
             query = select(Memory).where(
-                Memory.name == filename, Memory.size == filesize
+                Memory.name == filename
             )
             result = session.execute(query)
-            memory = result.scalar_one_or_none()
+            memory = result.scalars().first()
 
             if memory:
                 logger.info(f"Found duplicate file: {filename}, size: {filesize}")
                 # check if file really exists
-                if os.path.exists(memory.path):
-                    return memory
-                logger.warning(f"File in database does not exist on disk: {memory.path}")
+                if not os.path.exists(memory.path):
+                    logger.warning("Existing memory file is missing; reindex or delete its record before replacing")
+                return memory
             return None
 
     def save_file(self, file, metadata=None):
@@ -92,7 +90,7 @@ class StorageService:
             # check if file already exists
             existing_memory = self.check_file_exists(file.filename, filesize)
             if existing_memory:
-                raise ValueError(f"File '{file.filename}' already exists")
+                raise ValueError(f"File '{file.filename}' already exists; update its document content or delete it before replacing")
 
             # save file to disk
             filepath, filename, filesize = self._save_file_to_disk(file)
@@ -118,11 +116,17 @@ class StorageService:
 
                 # process document
                 document = self._process_document(filepath, metadata)
+                if document is None:
+                    raise RuntimeError("Document processing failed; memory was saved but is not indexed")
                 if document:
                     memory.document_id = document.id
                     session.add(memory)
                     session.commit()
                     logger.info(f"Memory record updated, associated document ID: {document.id}")
+
+                if document:
+                    self.document_service.refresh_document_index(document.id)
+                    document = self.document_service.get_document_by_id(document.id)
 
                 # refresh memory object to ensure all fields are up to date
                 session.refresh(memory)

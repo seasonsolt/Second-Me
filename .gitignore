@@ -6,11 +6,11 @@ __pycache__
 .ruff_cache
 .vscode/
 .ruff_cache/
-poetry.lock
+.venv/
 .hf_cache/
 .poetry-venv/
 
-llama.cpp
+/llama.cpp/
 *.ipynb
 data/db/*
 data/chroma_db/*
@@ -64,7 +64,7 @@ resources/L2/data/*
 
 resources/model/output/gguf/*
 resources/L2/base_models/*
-logs/*.log
+logs/*.log*
 logs/train/*.log
 
 # Runtime files
@@ -80,3 +80,8 @@ scripts/check_cuda_status.ps1
 scripts/test_cuda_detection.bat
 .env
 .gpu_selected
+
+/llama.cpp.backup.*/
+
+resources/L1/graphrag_runtime/
+resources/L1/graphrag_cache/

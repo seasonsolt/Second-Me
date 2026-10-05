@@ -28,7 +28,8 @@ async def get_response(query:str) -> str | None | Any:
 
     data={
         "messages": messages,
-        "stream": True
+        "stream": True,
+        "metadata": {"enable_l0_retrieval": True, "enable_l1_retrieval": False}
     }
 
     conn = http.client.HTTPConnection(url)
@@ -57,7 +58,7 @@ async def get_response(query:str) -> str | None | Any:
 
     conn.close()
     if full_content:
-        messages.append({"role": "system", "content": full_content})
+        messages.append({"role": "assistant", "content": full_content})
         return full_content
     else:
         return None

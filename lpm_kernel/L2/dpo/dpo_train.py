@@ -7,6 +7,7 @@ from datasets import Dataset
 from trl import DPOConfig, DPOTrainer
 from peft import LoraConfig, AutoPeftModelForCausalLM, get_peft_model
 from datetime import datetime, timedelta
+from lpm_kernel.L2.chat_data import chat_template_kwargs
 # from clearml import Task
 
 def get_east_eight_time_formatted():
@@ -35,7 +36,7 @@ def training_data_processor(args, SYS = "You are a helpful assistant.\n\n"):
     }
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_path, padding_side="left")
     training_data = {
-        "prompt": tokenizer.apply_chat_template(training_data["prompt"], tokenize=False),
+        "prompt": tokenizer.apply_chat_template(training_data["prompt"], tokenize=False, add_generation_prompt=True, **chat_template_kwargs(tokenizer)),
         "chosen": training_data["chosen"],
         "rejected": training_data["rejected"]
     }
@@ -78,7 +79,7 @@ def train(args):
         max_grad_norm=args.max_grad_norm,
         lr_scheduler_type="cosine",
         logging_steps=5,
-        optim="adamw_hf",  # use the optimizer suits cpu
+        optim="adamw_torch",  # use the optimizer suits cpu
         loss_type="sigmoid",
         warmup_steps=args.warmup_steps,
         warmup_ratio=args.warmup_ratio,
@@ -88,6 +89,7 @@ def train(args):
         seed=42,
         output_dir="resources/model/output/dpo_model/adapter",
         remove_unused_columns=False,
+        use_cpu=True,
         fp16=False, 
         bf16=False,
         beta=args.beta,
@@ -95,7 +97,7 @@ def train(args):
 
     dpo_trainer = DPOTrainer(
         model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         args=training_args,
         train_dataset=dataset,
         peft_config=lora_config,

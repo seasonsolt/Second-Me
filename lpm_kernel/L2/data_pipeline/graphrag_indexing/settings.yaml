@@ -27,10 +27,11 @@ input:
 models:
   default_chat_model:
     api_base: https://api.openai.com/v1
-    api_key: sk-xxxxxx
+    api_key: ${GRAPHRAG_CHAT_API_KEY}
     async_mode: threaded
     auth_type: api_key
     concurrent_requests: 2
+    encoding_model: cl100k_base
     max_retries: -1
     model: gpt-4o-mini
     model_supports_json: true
@@ -38,13 +39,13 @@ models:
     retry_strategy: native
     tokens_per_minute: 0
     type: openai_chat
-    encoding_model: cl100k_base
   default_embedding_model:
     api_base: https://api.openai.com/v1
-    api_key: sk-xxxxxx
+    api_key: ${GRAPHRAG_EMBEDDING_API_KEY}
     async_mode: threaded
     auth_type: api_key
     concurrent_requests: 2
+    encoding_model: cl100k_base
     max_retries: -1
     model: text-embedding-ada-002
     model_supports_json: true
@@ -52,7 +53,6 @@ models:
     retry_strategy: native
     tokens_per_minute: 0
     type: openai_embedding
-    encoding_model: cl100k_base
 output:
   base_dir: /your_dir
   type: file

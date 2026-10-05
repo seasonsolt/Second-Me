@@ -43,38 +43,26 @@ RUN python -c "import sqlite3; print('SQLite version:', sqlite3.sqlite_version);
 # Create directories
 RUN mkdir -p /app/dependencies /app/data/sqlite /app/data/chroma_db /app/logs /app/run /app/resources
 
-# Copy dependency files
-COPY dependencies/graphrag-modified.tar.gz /app/dependencies/
-COPY dependencies/llama.cpp.zip /app/dependencies/
-
-# Build llama.cpp
-RUN LLAMA_LOCAL_ZIP="dependencies/llama.cpp.zip" \
-    && echo "Using local llama.cpp archive..." \
-    && unzip -q "$LLAMA_LOCAL_ZIP" \
-    && cd llama.cpp \
-    && mkdir -p build && cd build \
-    && cmake .. \
-    && cmake --build . --config Release \
-    && if [ ! -f "bin/llama-server" ]; then \
-         echo "Build failed: llama-server executable not found" && exit 1; \
-       else \
-         echo "Successfully built llama-server"; \
-       fi \
-    && cp bin/llama-server /usr/local/bin/ \
-    && chmod +x /usr/local/bin/llama-server \
-    && echo "Installed llama-server to /usr/local/bin/"
+# Linux containers use CPU/CUDA, never native macOS MLX or Metal.
+COPY dependencies/graphrag-1.2.1.dev27.tar.gz /app/dependencies/
+COPY dependencies/llama.cpp.version /app/dependencies/
+COPY scripts/build_llama.sh /app/scripts/build_llama.sh
+RUN LLAMA_PORTABLE_BUILD=1 bash /app/scripts/build_llama.sh cpu
 
 # Copy project configuration
-COPY pyproject.toml README.md /app/
+COPY pyproject.toml poetry.lock README.md /app/
 
 RUN pip install -U pip setuptools wheel
-RUN pip install --no-cache-dir spacy==3.7.5
-RUN pip install --force-reinstall dependencies/graphrag-modified.tar.gz
+
 
 RUN pip uninstall -y chromadb \
  && pip install chromadb==0.4.24 --no-binary chromadb --force-reinstall 
 
 RUN poetry install --no-interaction --no-root
+
+RUN python -c "import shutil,zipfile; p='dependencies/graphrag-1.2.1.dev27.tar.gz'; shutil.copyfile(p,'/tmp/graphrag.zip') if zipfile.is_zipfile(p) else shutil.copyfile(p,'/tmp/graphrag.tar.gz')" \
+    && pip install --no-deps --force-reinstall /tmp/graphrag.* \
+    && rm /tmp/graphrag.*
 
 # Copy source code
 COPY docker/ /app/docker/

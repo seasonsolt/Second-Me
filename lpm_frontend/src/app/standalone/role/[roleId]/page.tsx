@@ -159,7 +159,7 @@ export default function RoleChat() {
       })),
       metadata: {
         enable_l0_retrieval: role.enable_l0_retrieval,
-        enable_l1_retrieval: role.enable_l1_retrieval || true,
+        enable_l1_retrieval: role.enable_l1_retrieval ?? true,
         role_id: role.uuid
       },
       temperature: 0.01,

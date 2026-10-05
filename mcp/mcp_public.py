@@ -1,4 +1,3 @@
-from typing import Any
 from mcp.server.fastmcp import FastMCP
 import http.client
 import json
@@ -62,7 +61,7 @@ async def get_response(query:str, instance_id:str) -> str | None:
 
     conn.close()
     if full_content:
-        messages.append({"role": "system", "content": full_content})
+        messages.append({"role": "assistant", "content": full_content})
         return full_content
     else:
         return None

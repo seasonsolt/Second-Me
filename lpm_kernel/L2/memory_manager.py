@@ -102,14 +102,14 @@ class MemoryManager:
         if hasattr(model, "config"):
             try:
                 model.config.use_memory_efficient_attention = True
-            except:
+            except Exception:
                 pass
             
             # Enable flash attention for compatible GPUs
             if self.cuda_available and torch.cuda.get_device_capability()[0] >= 8:
                 try:
                     model.config.attn_implementation = "flash_attention_2"
-                except:
+                except Exception:
                     pass
         
         return model

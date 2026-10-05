@@ -7,7 +7,7 @@ from lpm_kernel.L1.bio import Note, Chunk, Bio, ShadeInfo, ShadeMergeInfo
 from lpm_kernel.L1.l1_generator import L1Generator
 from lpm_kernel.common.repository.database_session import DatabaseSession
 from lpm_kernel.file_data.document_service import document_service
-from lpm_kernel.models.l1 import L1Bio
+from lpm_kernel.models.l1 import L1Bio, L1Shade
 from lpm_kernel.models.l1 import (
     L1GenerationResult,
     L1Version,
@@ -278,7 +278,8 @@ def get_latest_global_bio() -> Optional[GlobalBioDTO]:
                 return None
 
             # Convert to DTO and return
-            return GlobalBioDTO.from_model(bio)
+            shades = session.query(L1Shade).filter(L1Shade.version == latest_version.version).all()
+            return GlobalBioDTO.from_model(bio, shades=shades, status=latest_version.status)
     except Exception as e:
         logger.error(f"Error getting global biography: {str(e)}", exc_info=True)
         return None

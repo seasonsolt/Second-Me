@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import axios from 'axios';
 import InfoModal from '@/components/InfoModal';
 import type { TrainingConfig } from '@/service/train';
 import {
@@ -49,27 +50,35 @@ interface TrainingDetail {
 
 const baseModelOptions = [
   {
+    value: 'Qwen3-1.7B',
+    label: 'Qwen3-1.7B (Recommended)'
+  },
+  {
+    value: 'Qwen3-4B-Instruct-2507',
+    label: 'Qwen3-4B-Instruct-2507 (Larger model)'
+  },
+  {
     value: 'Qwen2.5-0.5B-Instruct',
-    label: 'Qwen2.5-0.5B-Instruct (8GB+ RAM Recommended)'
+    label: 'Qwen2.5-0.5B-Instruct (Legacy, 8GB+ RAM)'
   },
   {
     value: 'Qwen2.5-1.5B-Instruct',
-    label: 'Qwen2.5-1.5B-Instruct (16GB+ RAM Recommended)'
+    label: 'Qwen2.5-1.5B-Instruct (Legacy, 16GB+ RAM)'
   },
   {
     value: 'Qwen2.5-3B-Instruct',
-    label: 'Qwen2.5-3B-Instruct (32GB+ RAM Recommended)'
+    label: 'Qwen2.5-3B-Instruct (Legacy, 32GB+ RAM)'
   },
   {
     value: 'Qwen2.5-7B-Instruct',
-    label: 'Qwen2.5-7B-Instruct (64GB+ RAM Recommended)'
+    label: 'Qwen2.5-7B-Instruct (Legacy, 64GB+ RAM)'
   }
 ];
 
 // Title and explanation section
 const pageTitle = 'Training Process';
 const pageDescription =
-  'Transform your memories into a personalized AI model that thinks and communicates like you.';
+  'Train how your Second Me communicates. New facts stay available through memory retrieval.';
 
 export default function TrainingPage() {
   const checkTrainStatus = useTrainingStore((state) => state.checkTrainStatus);
@@ -87,7 +96,10 @@ export default function TrainingPage() {
   const [selectedInfo, setSelectedInfo] = useState<boolean>(false);
   const isTraining = useTrainingStore((state) => state.isTraining);
   const setIsTraining = useTrainingStore((state) => state.setIsTraining);
-  const [trainingParams, setTrainingParams] = useState<TrainingConfig>({} as TrainingConfig);
+  const [trainingParams, setTrainingParams] = useState<TrainingConfig>({
+    model_name: 'Qwen3-1.7B',
+    is_cot: false
+  });
   const [trainActionLoading, setTrainActionLoading] = useState(false);
   const [showCelebration, setShowCelebration] = useState(false);
   const [showMemoryModal, setShowMemoryModal] = useState(false);
@@ -401,7 +413,9 @@ export default function TrainingPage() {
       console.error('Error starting training:', error);
       setIsTraining(false);
 
-      if (error instanceof Error) {
+      if (axios.isAxiosError(error)) {
+        message.error(error.response?.data?.message || error.message || 'Failed to start training');
+      } else if (error instanceof Error) {
         message.error(error.message || 'Failed to start training');
       } else {
         message.error('Failed to start training');
@@ -434,7 +448,9 @@ export default function TrainingPage() {
       console.error('Error retraining model:', error);
       setIsTraining(false);
 
-      if (error instanceof Error) {
+      if (axios.isAxiosError(error)) {
+        message.error(error.response?.data?.message || error.message || 'Failed to retrain model');
+      } else if (error instanceof Error) {
         message.error(error.message || 'Failed to retrain model');
       } else {
         message.error('Failed to retrain model');

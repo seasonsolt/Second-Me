@@ -79,6 +79,22 @@ export interface TrainingParams {
   learning_rate?: number;
   number_of_epochs?: number;
   use_cuda?: boolean;
+  training_backend?: 'auto' | 'mlx' | 'pytorch';
+  resolved_training_backend?: 'mlx' | 'pytorch' | null;
+  selected_training_backend?: 'mlx' | 'pytorch' | null;
+  apple_silicon?: boolean;
+  mlx_available?: boolean;
+  training_backend_error?: string | null;
+  training_objective?: 'sft';
+  dpo_executed?: boolean;
+  training_language?: string | null;
+  batch_size?: number;
+  gradient_accumulation_steps?: number;
+  max_seq_length?: number;
+  gradient_checkpointing?: boolean;
+  group_by_length?: boolean;
+  validation_batches?: number;
+  max_steps?: number | null;
 }
 
 export interface TrainBaseParams {

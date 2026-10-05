@@ -4,6 +4,13 @@ import logging
 import psutil
 import time
 import subprocess
+import platform
+import re
+import socket
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
 import torch  # Add torch import for CUDA detection
 import threading
 import queue
@@ -23,6 +30,8 @@ class LocalLLMService:
     def __init__(self):
         self._client = None
         self._stopping_server = False
+        self._process = None
+        self._server_log = None
         
     @property
     def client(self) -> OpenAI:
@@ -39,290 +48,231 @@ class LocalLLMService:
             )
         return self._client
 
+    def _server_settings(self):
+        config = Config.from_env()
+        url = urlsplit(config.get("LOCAL_LLM_SERVICE_URL", "http://127.0.0.1:8080/v1"))
+        port = url.port or (443 if url.scheme == "https" else 8080)
+        origin = urlunsplit((url.scheme, url.netloc, "", "", ""))
+        context_size = int(config.get("LOCAL_LLM_CONTEXT_SIZE", "8192"))
+        parallel = int(config.get("LOCAL_LLM_PARALLEL", "1"))
+        if context_size < 512 or parallel < 1 or context_size // parallel < 512:
+            raise ValueError("Each llama-server slot needs at least 512 context tokens")
+        return port, origin, context_size, parallel
+
+    def _server_path(self):
+        executable = "llama-server.exe" if os.name == "nt" else "llama-server"
+        return Path.cwd() / "llama.cpp" / "build" / "bin" / executable
+
+    def _managed_processes(self):
+        server_path = self._server_path().resolve()
+        port, _, _, _ = self._server_settings()
+        for process in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                args = process.cmdline()
+                if not args:
+                    continue
+                executable = Path(args[0])
+                if not executable.is_absolute():
+                    executable = Path(process.cwd()) / executable
+                if executable.resolve() != server_path:
+                    continue
+                for flag in ("--port", "-p"):
+                    if flag in args and args[args.index(flag) + 1] == str(port):
+                        yield process
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, IndexError):
+                continue
+
+    def _ensure_port_available(self, host, port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, port))
+            except OSError as exc:
+                raise RuntimeError(f"Port {port} is already in use; choose another LOCAL_LLM_SERVICE_URL") from exc
+
     def start_server(self, model_path: str, use_gpu: bool = True) -> bool:
-        """
-        Start the llama-server service with GPU acceleration when available
-        
-        Args:
-            model_path: Path to the GGUF model file
-            use_gpu: Whether to use GPU acceleration if available
-            
-        Returns:
-            bool: True if server started successfully, False otherwise
-        """
+        """Start the pinned server for this worktree and wait for model readiness."""
+        started_process = None
+        started_log = None
         try:
-            # Check if server is already running
+            model = Path(model_path).resolve()
+            if not model.is_file():
+                raise FileNotFoundError(f"GGUF model not found: {model}")
+            server_path = self._server_path()
+            revision = (Path.cwd() / "dependencies" / "llama.cpp.version").read_text().strip()
+            marker = server_path.parent.parent / ".secondme-build"
+            build = marker.read_text().strip().split() if marker.exists() else []
+            if not server_path.is_file() or len(build) != 2 or build[0] != revision:
+                raise RuntimeError("llama.cpp build is missing or obsolete; rerun setup for this platform")
+
             status = self.get_server_status()
             if status.is_running:
-                logger.info("LLama server is already running")
+                args = status.process_info.cmdline
+                loaded_model = args[args.index("-m") + 1] if "-m" in args else None
+                if loaded_model and Path(loaded_model).resolve() != model:
+                    raise RuntimeError("Stop this worktree's current model before loading another")
                 return True
 
-            # Check for CUDA availability if GPU was requested
-            cuda_available = torch.cuda.is_available() if use_gpu else False
-            cuda_available = False
-            gpu_info = ""
-            
-            if use_gpu and cuda_available:
-                gpu_device = torch.cuda.current_device()
-                gpu_info = f" using GPU: {torch.cuda.get_device_name(gpu_device)}"
-                gpu_memory = torch.cuda.get_device_properties(gpu_device).total_memory / (1024**3)
-                
-                logger.info(f"CUDA is available. Using GPU acceleration{gpu_info}")
-                logger.info(f"CUDA device capabilities: {torch.cuda.get_device_capability(gpu_device)}")
-                logger.info(f"CUDA memory: {gpu_memory:.2f} GB")
-                
-                # Pre-initialize CUDA to speed up first inference
-                logger.info("Pre-initializing CUDA context to speed up first inference")
-                torch.cuda.init()
-                torch.cuda.empty_cache()
-            elif use_gpu and not cuda_available:
-                logger.warning("CUDA was requested but is not available. Using CPU instead.")
-            else:
-                logger.info("Using CPU for inference (GPU not requested)")
-
-            # Check for GPU optimization marker
-            gpu_optimized = False
-            model_dir = os.path.dirname(model_path)
-            gpu_marker_path = os.path.join(model_dir, "gpu_optimized.json")
-            if os.path.exists(gpu_marker_path):
-                try:
-                    with open(gpu_marker_path, 'r') as f:
-                        gpu_data = json.load(f)
-                        if gpu_data.get("gpu_optimized", False):
-                            gpu_optimized = True
-                            logger.info(f"Found GPU optimization marker created on {gpu_data.get('optimized_on', 'unknown date')}")
-                except Exception as e:
-                    logger.warning(f"Error reading GPU marker file: {e}")
-
-            # Get the correct path to the llama-server executable
-            base_dir = os.getcwd()
-            server_path = os.path.join(base_dir, "llama.cpp", "build", "bin", "llama-server")
-            
-            # For Windows, add .exe extension if needed
-            if os.name == 'nt' and not server_path.endswith('.exe'):
-                server_path += '.exe'
-                
-            # Verify executable exists
-            if not os.path.exists(server_path):
-                logger.error(f"llama-server executable not found at: {server_path}")
-                return False
-                
-            # Start server with optimal parameters for faster startup
-            cmd = [
-                server_path,
-                "-m", model_path,
-                "--host", "0.0.0.0",
-                "--port", "8080",
-                "--ctx-size", "2048",     # Default context size (adjust based on needs)
-                "--parallel", "2",        # Enable request parallelism
-                "--cont-batching"         # Enable continuous batching
+            metal = use_gpu and build[1] == "metal" and platform.system() == "Darwin"
+            cuda = use_gpu and build[1] == "cuda" and torch.cuda.is_available()
+            backend = "Metal" if metal else "CUDA" if cuda else "CPU"
+            port, origin, context_size, parallel = self._server_settings()
+            # Loopback by default; Docker sets 0.0.0.0 so its port mapping reaches the server.
+            host = Config.from_env().get("LLAMA_SERVER_HOST", "127.0.0.1")
+            self._ensure_port_available(host, port)
+            command = [
+                str(server_path), "-m", str(model), "--host", host,
+                "--port", str(port), "--ctx-size", str(context_size),
+                "--parallel", str(parallel), "--cont-batching", "--jinja",
+                "--chat-template-kwargs", '{"enable_thinking":false}',
+                "--n-gpu-layers", "999" if metal or cuda else "0",
+                "--threads", str(max(1, (os.cpu_count() or 2) - 1)),
             ]
-            
-            # Set up environment with CUDA variables to ensure GPU detection
-            env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = ""
-            
-            # Add GPU-related parameters if CUDA is available
-            if cuda_available and use_gpu:
-                # Force GPU usage with optimal parameters for faster loads
-                cmd.extend([
-                    "--n-gpu-layers", "999",  # Use all layers on GPU
-                    "--tensor-split", "0",    # Use the first GPU for all operations
-                    "--main-gpu", "0",        # Use GPU 0 as the primary device
-                    "--mlock"                 # Lock memory to prevent swapping during inference
-                ])
-                
-                # Set CUDA environment variables to help with GPU detection
-                env["CUDA_VISIBLE_DEVICES"] = "0"  # Force using first GPU
-                
-                # Ensure comprehensive library paths for CUDA
-                cuda_lib_paths = [
-                    "/usr/local/cuda/lib64",
-                    "/usr/lib/cuda/lib64",
-                    "/usr/local/lib",
-                    "/usr/lib/x86_64-linux-gnu",
-                    "/usr/lib/wsl/lib"  # For Windows WSL environments
-                ]
-                
-                # Build a comprehensive LD_LIBRARY_PATH
-                current_ld_path = env.get("LD_LIBRARY_PATH", "")
-                for path in cuda_lib_paths:
-                    if os.path.exists(path) and path not in current_ld_path:
-                        current_ld_path = f"{path}:{current_ld_path}" if current_ld_path else path
-                
-                env["LD_LIBRARY_PATH"] = current_ld_path
-                logger.info(f"Setting LD_LIBRARY_PATH to: {current_ld_path}")
-                
-                # If this is Windows, use different approach for CUDA libraries
-                if os.name == 'nt':
-                    # Windows typically has CUDA in PATH already if installed
-                    logger.info("Windows system detected, using system CUDA libraries")
-                else:
-                    # On Linux, try to find CUDA libraries in common locations
-                    for cuda_path in [
-                        # Common CUDA paths
-                        "/usr/local/cuda/lib64",
-                        "/usr/lib/cuda/lib64",
-                        "/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib",
-                        "/usr/local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib",
-                    ]:
-                        if os.path.exists(cuda_path):
-                            # Add CUDA path to library path
-                            env["LD_LIBRARY_PATH"] = f"{cuda_path}:{env.get('LD_LIBRARY_PATH', '')}"
-                            env["CUDA_HOME"] = os.path.dirname(cuda_path)
-                            logger.info(f"Found CUDA at {cuda_path}, setting environment variables")
-                            break
-
-                # NOTE: CUDA support and rebuild should be handled at build/setup time (e.g., Docker build or setup script).
-                # The runtime check and rebuild logic has been removed for efficiency and reliability.
-                # Ensure llama.cpp is built with CUDA support before running the server if GPU is required.
-
-                # Pre-heat GPU to ensure faster initial response
-                if torch.cuda.is_available():
-                    logger.info("Pre-warming GPU to reduce initial latency...")
-                    dummy_tensor = torch.zeros(1, 1).cuda()
-                    del dummy_tensor
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                    logger.info("GPU warm-up complete")
-                
-                logger.info("Using GPU acceleration for inference with optimized settings")
-            else:
-                # If GPU isn't available or supported, optimize for CPU
-                cmd.extend([
-                    "--threads", str(max(1, os.cpu_count() - 1)),  # Use all CPU cores except one
-                ])
-                logger.info(f"Using CPU-only mode with {max(1, os.cpu_count() - 1)} threads")
-            
-            logger.info(f"Starting llama-server with command: {' '.join(cmd)}")
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                env=env
+            logs = Path.cwd() / "logs"
+            logs.mkdir(exist_ok=True)
+            log_path = logs / f"llama-server-{port}.log"
+            self._server_log = log_path.open("w", encoding="utf-8")
+            started_log = self._server_log
+            self._process = subprocess.Popen(
+                command, stdout=self._server_log, stderr=subprocess.STDOUT,
+                env=os.environ.copy(), start_new_session=os.name != "nt",
             )
-            
-            # Wait for server to start (longer wait for GPU initialization)
-            wait_time = 5 if cuda_available and use_gpu else 3
-            logger.info(f"Waiting {wait_time} seconds for server to start...")
-            time.sleep(wait_time)
-            
-            # Check if process is still running
-            if process.poll() is None:
-                # Log initialization success
-                if cuda_available and use_gpu:
-                    logger.info(f"✅ LLama server started successfully with GPU acceleration{gpu_info}")
-                else:
-                    logger.info("✅ LLama server started successfully in CPU-only mode")
-                return True
-            else:
-                stdout, stderr = process.communicate()
-                logger.error(f"Failed to start llama-server: {stderr}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error starting llama-server: {str(e)}")
+            started_process = self._process
+            logger.info("Starting %s llama-server on port %s; log: %s", backend, port, log_path)
+            deadline = time.monotonic() + 120
+            with httpx.Client(timeout=1, trust_env=False) as client:
+                while time.monotonic() < deadline:
+                    if self._process.poll() is not None:
+                        raise RuntimeError(f"llama-server exited; see {log_path}")
+                    try:
+                        if (client.get(origin + "/health").status_code == 200
+                                and self._process.poll() is None):
+                            logger.info("llama-server ready (%s), context=%s, parallel=%s", backend, context_size, parallel)
+                            return True
+                    except httpx.HTTPError:
+                        pass
+                    time.sleep(0.2)
+            raise TimeoutError(f"llama-server did not become ready; see {log_path}")
+        except Exception as exc:
+            logger.error("Error starting llama-server: %s", exc)
+            if started_process is not None and started_process.poll() is None:
+                started_process.terminate()
+                try:
+                    started_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    started_process.kill()
+                    started_process.wait()
+            if started_log is not None:
+                started_log.close()
+            if started_log is self._server_log:
+                self._server_log = None
+            if started_process is self._process:
+                self._process = None
             return False
 
     def stop_server(self) -> ServerStatus:
-        """
-        Stop the llama-server service.
-        Find and forcibly terminate all llama-server processes
-        
-        Returns:
-            ServerStatus: Service status object containing information about whether processes are still running
-        """
+        """Stop only the server executable and port belonging to this worktree."""
+        if self._stopping_server:
+            return self.get_server_status()
+        self._stopping_server = True
         try:
-            if self._stopping_server:
-                logger.info("Server is already in the process of stopping")
-                return self.get_server_status()
-            
-            self._stopping_server = True
-        
-            try:
-                # Find all possible llama-server processes and forcibly terminate them
-                terminated_pids = []
-                for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            for process in self._managed_processes():
+                try:
+                    process.terminate()
                     try:
-                        cmdline = proc.cmdline()
-                        if any("llama-server" in cmd for cmd in cmdline):
-                            pid = proc.pid
-                            logger.info(f"Force terminating llama-server process, PID: {pid}")
-                            
-                            # Directly use kill signal to forcibly terminate
-                            proc.kill()
-                            
-                            # Ensure the process has been terminated
-                            try:
-                                proc.wait(timeout=0.2)  # Slightly increase wait time to ensure process termination
-                                terminated_pids.append(pid)
-                                logger.info(f"Successfully terminated llama-server process {pid}")
-                            except psutil.TimeoutExpired:
-                                # If timeout, try to terminate again
-                                logger.warning(f"Process {pid} still running, sending SIGKILL again")
-                                try:
-                                    import os
-                                    import signal
-                                    os.kill(pid, signal.SIGKILL)  # Use system-level SIGKILL signal
-                                    terminated_pids.append(pid)
-                                    logger.info(f"Successfully force killed llama-server process {pid} with SIGKILL")
-                                except ProcessLookupError:
-                                    # Process no longer exists
-                                    terminated_pids.append(pid)
-                                    logger.info(f"Process {pid} no longer exists after kill attempt")
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                        continue
-                
-                if terminated_pids:
-                    logger.info(f"Terminated llama-server processes: {terminated_pids}")
-                else:
-                    logger.info("No running llama-server process found")
-                
-                # Check again if any llama-server processes are still running
-                return self.get_server_status()
-            
-            finally:
-                self._stopping_server = False
-            
-        except Exception as e:
-            logger.error(f"Error stopping llama-server: {str(e)}")
+                        process.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            if self._process is not None:
+                self._process.poll()
+            if self._server_log is not None:
+                self._server_log.close()
+                self._server_log = None
+            self._process = None
+            return self.get_server_status()
+        finally:
             self._stopping_server = False
-            return ServerStatus.not_running()
 
     def get_server_status(self) -> ServerStatus:
-        """
-        Get the current status of llama-server
-        Returns: ServerStatus object
-        """
         try:
-            base_dir = os.getcwd()
-            server_path = os.path.join(base_dir, "llama.cpp", "build", "bin", "llama-server")
-            server_exec_name = os.path.basename(server_path)
-            
-            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-                try:
-                    cmdline = proc.cmdline()
-                    # Check both for the executable name and the full path
-                    if any(server_exec_name in cmd for cmd in cmdline) or any("llama-server" in cmd for cmd in cmdline):
-                        with proc.oneshot():
-                            process_info = ProcessInfo(
-                                pid=proc.pid,
-                                cpu_percent=proc.cpu_percent(),
-                                memory_percent=proc.memory_percent(),
-                                create_time=proc.create_time(),
-                                cmdline=cmdline,
-                            )
-                            return ServerStatus.running(process_info)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            for process in self._managed_processes():
+                with process.oneshot():
+                    return ServerStatus.running(ProcessInfo(
+                        pid=process.pid,
+                        cpu_percent=process.cpu_percent(),
+                        memory_percent=process.memory_percent(),
+                        create_time=process.create_time(),
+                        cmdline=process.cmdline(),
+                    ))
+        except (psutil.Error, OSError, ValueError) as exc:
+            logger.error("Error checking llama-server status: %s", exc)
+        return ServerStatus.not_running()
+
+    def _count_prompt_tokens(self, client, origin, messages):
+        response = client.post(origin + "/apply-template", json={
+            "messages": messages,
+            "add_generation_prompt": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        })
+        response.raise_for_status()
+        prompt = response.json()["prompt"]
+        response = client.post(origin + "/tokenize", json={
+            "content": prompt, "add_special": True, "parse_special": True,
+        })
+        response.raise_for_status()
+        return len(response.json()["tokens"])
+
+    def prepare_chat_request(self, messages, max_tokens):
+        """Fit the real model template, history and references in one server slot."""
+        _, origin, context_size, parallel = self._server_settings()
+        capacity = context_size // parallel
+        output_tokens = min(max(1, max_tokens), capacity // 4)
+        budget = capacity - output_tokens - 32
+        fitted = [dict(message) for message in messages]
+        last_user = next((i for i in range(len(fitted) - 1, -1, -1)
+                          if fitted[i].get("role") == "user"), None)
+        if last_user is None:
+            raise ValueError("A user message is required")
+        with httpx.Client(timeout=10, trust_env=False) as client:
+            while self._count_prompt_tokens(client, origin, fitted) > budget:
+                last_user = max(i for i, message in enumerate(fitted) if message.get("role") == "user")
+                history = next((i for i in range(last_user) if fitted[i].get("role") != "system"), None)
+                if history is not None:
+                    del fitted[history]
+                    # Remove the corresponding assistant turn, not the current question.
+                    while history < len(fitted) and fitted[history].get("role") == "assistant":
+                        del fitted[history]
                     continue
-                    
-            return ServerStatus.not_running()
-            
-        except Exception as e:
-            logger.error(f"Error checking llama-server status: {str(e)}")
-            return ServerStatus.not_running()
+                reduced = False
+                for message in fitted:
+                    if message.get("role") != "system":
+                        continue
+                    match = re.search(r"<reference_memories>(.*?)</reference_memories>", message["content"], re.DOTALL)
+                    if match is None:
+                        continue
+                    references = re.findall(r'(<memory source="[^"]*">)(.*?)(</memory>)', match.group(1), re.DOTALL)
+                    if not references:
+                        continue
+                    # Remove the least-prioritized reference first; shorten the last one if needed.
+                    if len(references) > 1:
+                        references.pop()
+                        region = "\n".join("".join(reference) for reference in references)
+                    else:
+                        opening, content, closing = references[0]
+                        if len(content) > 128:
+                            region = opening + content[:len(content) // 2].rsplit("&", 1)[0] + "…" + closing
+                        else:
+                            region = "Relevant memories omitted to fit the context limit."
+                    message["content"] = message["content"][:match.start(1)] + "\n" + region + "\n" + message["content"][match.end(1):]
+                    reduced = True
+                    break
+                if not reduced:
+                    raise ValueError("Current question and system rules exceed the model context limit; shorten the question")
+        return fitted, output_tokens
 
     def _parse_response_chunk(self, chunk):
         """Parse different response chunk formats into a standardized format."""

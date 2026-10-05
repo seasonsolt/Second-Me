@@ -6,12 +6,13 @@ import random
 import re
 import traceback
 
-import openai
 import pandas as pd
 from tqdm import tqdm
 from enum import Enum
+from lpm_kernel.L2.memory_prompt import bounded_memory_content
+from lpm_kernel.L2.data_pipeline.data_prep.synthesis_config import get_synthesis_workers
+from lpm_kernel.common.performance import create_synthesis_client
 from lpm_kernel.api.services.user_llm_config_service import UserLLMConfigService
-from lpm_kernel.configs.config import Config
 from lpm_kernel.L2.data_pipeline.data_prep.diversity.utils import remove_similar_dicts
 import lpm_kernel.L2.data_pipeline.data_prep.diversity.template_diversity as template_diversity
 
@@ -59,12 +60,13 @@ class DiversityDataGenerator:
         else:
             self.model_name = user_llm_config.chat_model_name
     
-            self.client = openai.OpenAI(
+            self.client = create_synthesis_client(
+                "diversity",
                 api_key=user_llm_config.chat_api_key,
                 base_url=user_llm_config.chat_endpoint,
             )
         self.preference_language = preference_language
-        self.max_workers = os.environ.get("concurrency_threads", 2)
+        self.max_workers = get_synthesis_workers()
         self.data_synthesis_mode = os.environ.get("DATA_SYNTHESIS_MODE", "low")
         self.is_cot = is_cot
         if self.is_cot:
@@ -73,9 +75,9 @@ class DiversityDataGenerator:
             self.api_key = user_llm_config.thinking_api_key
             self.base_url = user_llm_config.thinking_endpoint
             if self.model_name.startswith("deepseek"):
-                self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = create_synthesis_client("diversity", api_key=self.api_key, base_url=self.base_url)
             else:
-                logger.error(f"Error model_name, longcot data generating model_name: deepseek series")
+                logger.error("Error model_name, longcot data generating model_name: deepseek series")
                 raise
 
 
@@ -107,7 +109,7 @@ class DiversityDataGenerator:
                     }
                     for item in entities
                 }
-        except Exception as e:
+        except Exception:
             return None, None, None
         
         # read note data
@@ -153,75 +155,23 @@ class DiversityDataGenerator:
         return entity2desc, entity2type, QA_config
 
 
+    def _reference_context(self, cluster: dict) -> str:
+        parts = [getattr(self, "global_bio", ""),
+                 f"Entity: {cluster['entity_name']}\n{cluster.get('entity_description', '')}"]
+        for note in cluster.get("note", []):
+            content = note.get("processed") or note.get("content", "")
+            parts.append(f"Title: {note.get('title', '')}\nContent: {content}\n"
+                         f"AI Insight: {note.get('insight', '')}")
+        return bounded_memory_content("\n\n".join(parts))
+
     def _get_A_input(self, cluster: dict, question: str, user_name: str) -> str:
-        """Generate the input for answer generation.
-        
-        Args:
-            cluster: The data cluster containing entity information.
-            question: The question to be answered.
-            user_name: Name of the user.
-            
-        Returns:
-            A string containing the formatted input for the answer generation model.
-        """
-        entity = cluster["entity_name"]
-        entity_desc = cluster["entity_description"]
-        entity_desc = f"Entity'{entity}',Relevant Info：'{entity_desc}'"
-
-        tmpl = f"""I am {user_name}. Regarding {entity_desc}, here is some information I previously mentioned:\n\n"""
-
-        chunk_tmpl = ""
-        for ind, entity_dict in enumerate(cluster["note"]):
-            if "processed" in entity_dict:
-                content = entity_dict["processed"]
-            else:
-                content = entity_dict["content"]
-                title = entity_dict["title"]
-                insight = entity_dict["insight"]
-                content = f"Title: {title}\nContent: {content}\nAI Insight: {insight}"
-
-            tmp = f"___________________\n{content}\n"
-            chunk_tmpl += tmp
-
-        tmpl = (
-            tmpl
-            + chunk_tmpl
-            + f"Based on the information I have previously recorded, please answer '{question}'. Note that you need to ensure the perspective is consistent, meaning that all instances of {user_name} should be replaced with the second person 'you'."
-        )
-
-        return tmpl
-
+        return (f"Reference material:\n{self._reference_context(cluster)}\n\n"
+                f"Answer '{question}' as {user_name}'s personal assistant. "
+                "Use only the supplied references for personal facts; state when evidence is missing.")
 
     def _get_Q_input(self, cluster: dict, user_name: str) -> str:
-        """Generate the input for question generation.
-        
-        Args:
-            cluster: The data cluster containing entity information.
-            user_name: Name of the user.
-            
-        Returns:
-            A string containing the formatted input for the question generation model.
-        """
-        entity = cluster["entity_name"]
-        entity_desc = cluster["entity_description"]
-        entity_desc = f"Entity'{entity}'：{entity_desc}"
-        tmpl = f""""For {entity_desc}, here is the relevant content from my interactions with the AI robot:\n"""
-        chunk_tmpl = ""
-        for ind, entity_dict in enumerate(cluster["note"]):
-            content = entity_dict["content"]
-            title = entity_dict["title"]
-            insight = entity_dict["insight"]
-            content = f"Title: {title}\nContent: {content}\nAI Insight: {insight}"
-
-            tmp = f"# Content {ind+1} #\n{content}\n"
-            chunk_tmpl += tmp
-        tmpl = (
-            tmpl
-            + chunk_tmpl
-            + f"Please help me generate questions; note that you need to phrase them from my perspective, meaning all expressions of {user_name} should be replaced with the first person 'I'."
-        )
-
-        return tmpl
+        return (f"Reference material:\n{self._reference_context(cluster)}\n\n"
+                f"Generate questions from {user_name}'s perspective using only these references.")
 
 
     def generate_data(self, entities_path: str, note_list: list, config_path: str, 
@@ -237,6 +187,7 @@ class DiversityDataGenerator:
             global_bio: User biography text.
             output_path: Path to save the generated data.
         """
+        self.global_bio = global_bio
         language_desc = f"Keep your response in {self.preference_language}"
 
         entity2desc, entity2type, QA_config = self._preprocess(
@@ -254,7 +205,7 @@ class DiversityDataGenerator:
         a_dict = {item["type"]: {k: item[k] for k in item if k != "type"} for item in tmp}
 
         templater = template_diversity.templater(
-            q_dict, a_dict, user_name, global_bio, self.is_cot
+            q_dict, a_dict, user_name, "", self.is_cot
         )
 
         entity2desc_list = [{**{"entity_name": k}, **v} for k, v in entity2desc.items()]
@@ -326,8 +277,8 @@ class DiversityDataGenerator:
 
         if len(filtered_tiny_clusters) > 0:
             logger.info("Execute single entity cluster generation")
-            q_dict.pop("unanswerable")
-            q_dict.pop("global")
+            q_dict.pop("unanswerable", None)
+            q_dict.pop("global", None)
             data_tiny = self._pipline(filtered_tiny_clusters, DataSynthesisMode[self.data_synthesis_mode.upper()].value["tiny_aug_para"], 
                                       q_dict, templater, language_desc, user_name)
         else:
@@ -360,6 +311,8 @@ class DiversityDataGenerator:
         Returns:
             List of generated QA data.
         """
+        if not q_dict or not any(value["weight"] > 0 for value in q_dict.values()):
+            return []
         explode_clusters = []
         explode_questions_types = []
         for item in clusters:
@@ -393,6 +346,9 @@ class DiversityDataGenerator:
                     "question_type": question_type,
                     "answer_type": answer_type,
                     "doc_id": cluster["doc_id"],
+                    "training_type": "style_with_context",
+                    "context": self._reference_context(cluster),
+                    "memory_format_version": 1,
                 }
             )
         return data
@@ -437,7 +393,7 @@ class DiversityDataGenerator:
                     # Extend clusters and question types to match the number of questions
                     flat_clusters.extend([cluster] * len(result))
                     flat_question_types.extend([question_type] * len(result))
-                except Exception as e:
+                except Exception:
                     logger.error(traceback.format_exc())
 
         # safety check
@@ -459,7 +415,7 @@ class DiversityDataGenerator:
                     result, answer_type = future.result()
                     answers.append(result)
                     answer_types.append(answer_type)
-                except Exception as e:
+                except Exception:
                     logger.error(traceback.format_exc())
 
         return questions, answers, answer_types, flat_question_types, flat_clusters
@@ -501,14 +457,14 @@ class DiversityDataGenerator:
                 res = "<think>" + response_message.reasoning_content + "</think>" + response_message.content
             else:
                 res = response.choices[0].message.content
-        except Exception as e:
+        except Exception:
             logging.error(traceback.format_exc())
         
         # post-processing
         try:
             pattern = r"Question\s*\d+\s*:\s*(.*?)\|\|"
             questions = re.findall(pattern, res + "||")
-        except Exception as e:
+        except Exception:
             logger.error(traceback.format_exc())
             questions = []
             return questions
@@ -552,7 +508,7 @@ class DiversityDataGenerator:
                 res = "<think>" + response_message.reasoning_content + "</think>" + response_message.content
             else:
                 res = response.choices[0].message.content
-        except Exception as e:
+        except Exception:
             logging.error(traceback.format_exc())
             
         return res, answer_type

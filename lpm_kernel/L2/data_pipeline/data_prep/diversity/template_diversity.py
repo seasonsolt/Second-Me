@@ -1,7 +1,5 @@
-import json
 import random
 
-import pandas as pd
 
 
 Q_GENERATE_TEMPLATE = """# Role #
@@ -31,7 +29,7 @@ You will be provided with multiple historical interactions between people and AI
 __answer_rule__
 
 # Guidelines #
-1. Reason through and answer the questions, ideally mentioning specific previous content from the user (for example, 'You mentioned xxx before', 'You talked about xxx previously', 'We discussed xxx earlier', etc.).
+1. Use only the supplied references for personal facts. Do not claim past conversations or events without evidence. Match the user’s expression and preferences, and acknowledge missing evidence.
 2. Answer the questions as comprehensively as possible, ensuring that your responses are both accurate and in-depth, covering all aspects of the query.
 3. You must begin your response directly.
 4. Repeating the original question at the beginning of your answer is prohibited.
@@ -77,8 +75,8 @@ You will be provided with multiple historical interactions between people and AI
 __answer_rule__
 
 # Guidelines #
-1. Reason through and answer the questions, ideally mentioning specific previous content from the user (for example, 'You mentioned xxx before', 'You talked about xxx previously', 'We discussed xxx earlier', etc.). 
-2. Answer the questions as comprehensively as possible, ensuring that your responses are both accurate and in-depth, covering all aspects of the query. 
+1. Use only the supplied references for personal facts. Do not claim past conversations or events without evidence. Match the user’s expression and preferences, and acknowledge missing evidence.
+2. Answer the questions as comprehensively as possible, ensuring that your responses are both accurate and in-depth, covering all aspects of the query.
 
 # Response Format #
 <think>(thought and reasoning part)</think><answer>(answer part)</answer>
@@ -117,14 +115,14 @@ Therefore, through the comparison of the principles of invariance in physics and
 
 class templater:
     """Class for generating templates for question and answer generation.
-    
+
     This class handles the creation of templates for generating both questions
     and answers based on predefined rules and configurations.
     """
 
     def __init__(self, q_dict: dict, a_dict: dict, user_name: str = "", global_bio: str = "", is_cot: bool = True):
         """Initialize the templater with question and answer dictionaries.
-        
+
         Args:
             q_dict: Dictionary containing question type configurations.
             a_dict: Dictionary containing answer type configurations.
@@ -143,10 +141,10 @@ class templater:
 
     def get_A_template(self, question_type: str) -> tuple:
         """Generate the answer template for a specific question type.
-        
+
         Args:
             question_type: The type of question to generate an answer for.
-            
+
         Returns:
             A tuple containing the answer template and a list of chosen optional types.
         """
@@ -205,10 +203,10 @@ class templater:
 
     def get_Q_template(self, question_type_prompt: str) -> str:
         """Generate the question template based on the provided prompt.
-        
+
         Args:
             question_type_prompt: The prompt describing the question type.
-            
+
         Returns:
             The question generation template with the question type filled in.
         """

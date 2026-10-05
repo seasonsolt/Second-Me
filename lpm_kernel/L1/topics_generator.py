@@ -6,7 +6,7 @@ import json
 import math
 import traceback
 
-from openai import OpenAI
+from lpm_kernel.common.performance import create_synthesis_client
 from scipy.cluster.hierarchy import fcluster, linkage
 import numpy as np
 
@@ -35,7 +35,7 @@ class TopicsGenerator:
             "top_p": 0,
             "frequency_penalty": 0,
             "presence_penalty": 0,
-            "timeout": 30,
+            "timeout": 180,
             "response_format": {"type": "json_object"},
         }
         self.user_llm_config_service = UserLLMConfigService()
@@ -44,7 +44,8 @@ class TopicsGenerator:
             self.client = None
             self.model_name = None
         else:
-            self.client = OpenAI(
+            self.client = create_synthesis_client(
+                "l1_topics",
                 api_key=self.user_llm_config.chat_api_key,
                 base_url=self.user_llm_config.chat_endpoint,
             )

@@ -1,7 +1,7 @@
 'use client';
 
 import type React from 'react';
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useMemo } from 'react';
 import { Listbox, Transition } from '@headlessui/react';
 import { PlayIcon, StopIcon } from '@heroicons/react/24/outline';
 import { EVENT } from '../../utils/event';
@@ -12,8 +12,6 @@ import OpenAiModelIcon from '../svgs/OpenAiModelIcon';
 import CustomModelIcon from '../svgs/CustomModelIcon';
 import ColumnArrowIcon from '../svgs/ColumnArrowIcon';
 import DoneIcon from '../svgs/DoneIcon';
-import ThinkingModelModal from '../ThinkingModelModal';
-import { useModelConfigStore } from '@/store/useModelConfigStore';
 import classNames from 'classnames';
 
 interface BaseModelOption {
@@ -61,21 +59,9 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
   setSelectedInfo,
   cudaAvailable
 }) => {
-  const [openThinkingModel, setOpenThinkingModel] = useState<boolean>(false);
-  const [showThinkingWarning, setShowThinkingWarning] = useState<boolean>(false);
-  const thinkingModelConfig = useModelConfigStore((state) => state.thinkingModelConfig);
-
   const disabledChangeParams = useMemo(() => {
     return isTraining || trainSuspended;
   }, [isTraining, trainSuspended]);
-
-  const thinkingConfigComplete = useMemo(() => {
-    return (
-      !!thinkingModelConfig.thinking_model_name &&
-      !!thinkingModelConfig.thinking_api_key &&
-      !!thinkingModelConfig.thinking_endpoint
-    );
-  }, [thinkingModelConfig]);
 
   const trainButtonText = useMemo(() => {
     return isTraining
@@ -121,8 +107,16 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
         </button>
       </div>
       <p className="text-gray-600 mb-6 leading-relaxed">
-        {`Configure how your Second Me will be trained using your memory data and identity. Then click 'Start Training'.`}
+        {`Train your Second Me's style and preferences. Facts are supplied through memory retrieval.`}
       </p>
+      <p className="text-sm text-gray-500 mb-6">
+        {trainingParams.selected_training_backend === 'mlx'
+          ? 'Training uses MLX on Apple Silicon. This flow runs SFT; DPO is not included.'
+          : 'This flow runs SFT; DPO is not included.'}
+      </p>
+      {trainingParams.training_backend_error && (
+        <p className="text-sm text-red-600 mb-6">{trainingParams.training_backend_error}</p>
+      )}
 
       <div className="space-y-6">
         <div className="flex flex-col gap-10">
@@ -223,7 +217,12 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
             </div>
             <Listbox
               disabled={disabledChangeParams}
-              onChange={(value) => updateTrainingParams({ model_name: value })}
+              onChange={(value) =>
+                updateTrainingParams({
+                  ...trainingParams,
+                  model_name: value
+                })
+              }
               value={trainingParams.model_name}
             >
               <div className="relative mt-1">
@@ -380,13 +379,122 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
                   value={trainingParams.concurrency_threads}
                 />
                 <div className="text-xs text-gray-500">
-                  Enter an integer between 1 and 10 (recommended: 2)
+                  Start with 2; try 4 if your provider allows it. Range: 1–10.
                 </div>
               </div>
 
+              {(
+                [
+                  { key: 'batch_size', label: 'Batch Size', min: 1, max: 16, fallback: 1 },
+                  {
+                    key: 'gradient_accumulation_steps',
+                    label: 'Gradient Accumulation',
+                    min: 1,
+                    max: 64,
+                    fallback: 1
+                  },
+                  {
+                    key: 'max_seq_length',
+                    label: 'Maximum Sequence Length',
+                    min: 128,
+                    max: 32768,
+                    fallback: 4096
+                  }
+                ] as const
+              ).map(({ key, label, min, max, fallback }) => (
+                <div key={key} className="flex flex-col gap-2">
+                  <div className="font-medium">{label}</div>
+                  <InputNumber
+                    aria-label={label}
+                    className="!w-[300px]"
+                    disabled={disabledChangeParams}
+                    max={max}
+                    min={min}
+                    onChange={(value) => {
+                      if (value != null) updateTrainingParams({ ...trainingParams, [key]: value });
+                    }}
+                    precision={0}
+                    value={trainingParams[key] ?? fallback}
+                  />
+                </div>
+              ))}
+              <div className="text-xs text-gray-500">
+                Larger batches and sequences use more memory; 4096 tokens fits the full memory
+                context but needs roughly twice the activation memory of 2048. Longer samples are
+                skipped or truncated. Gradient accumulation combines small batches before updating
+                the model.
+              </div>
+              <Checkbox
+                checked={trainingParams.gradient_checkpointing ?? true}
+                disabled={disabledChangeParams}
+                onChange={(event) =>
+                  updateTrainingParams({
+                    ...trainingParams,
+                    gradient_checkpointing: event.target.checked
+                  })
+                }
+              >
+                Gradient Checkpointing (reduce training memory)
+              </Checkbox>
+              {trainingParams.selected_training_backend === 'mlx' && (
+                <>
+                  <Checkbox
+                    checked={trainingParams.group_by_length ?? true}
+                    disabled={disabledChangeParams}
+                    onChange={(event) =>
+                      updateTrainingParams({
+                        ...trainingParams,
+                        group_by_length: event.target.checked
+                      })
+                    }
+                  >
+                    Group Similar Lengths (reduce padding)
+                  </Checkbox>
+                  <div className="flex flex-col gap-2">
+                    <div className="font-medium">Validation Batches</div>
+                    <InputNumber
+                      aria-label="Validation Batches"
+                      className="!w-[300px]"
+                      disabled={disabledChangeParams || trainingParams.validation_batches === -1}
+                      max={1000}
+                      min={1}
+                      onChange={(value) => {
+                        if (value != null)
+                          updateTrainingParams({ ...trainingParams, validation_batches: value });
+                      }}
+                      precision={0}
+                      value={
+                        trainingParams.validation_batches === -1
+                          ? undefined
+                          : (trainingParams.validation_batches ?? 4)
+                      }
+                    />
+                    <Checkbox
+                      checked={trainingParams.validation_batches === -1}
+                      disabled={disabledChangeParams}
+                      onChange={(event) =>
+                        updateTrainingParams({
+                          ...trainingParams,
+                          validation_batches: event.target.checked ? -1 : 4
+                        })
+                      }
+                    >
+                      Validate Entire Held-out Set
+                    </Checkbox>
+                    <div className="text-xs text-gray-500">
+                      Smaller validation runs reduce startup time. Use the full set when comparing
+                      model quality.
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="flex flex-col gap-2 mt-4">
                 <div className="flex gap-3 items-center">
-                  <div className="font-medium">Enable CUDA GPU Acceleration</div>
+                  <div className="font-medium">
+                    {trainingParams.apple_silicon
+                      ? 'Apple Silicon Acceleration'
+                      : 'Enable CUDA GPU Acceleration'}
+                  </div>
                   <Tooltip title="When enabled, training will use CUDA GPU acceleration if available on your system. This can significantly speed up training but requires compatible NVIDIA hardware and drivers.">
                     <QuestionCircleOutlined className="cursor-pointer" />
                   </Tooltip>
@@ -394,9 +502,15 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
                 <div className="flex items-center">
                   <label className="inline-flex items-center cursor-pointer relative">
                     <input
-                      checked={trainingParams.use_cuda}
+                      checked={
+                        trainingParams.apple_silicon
+                          ? trainingParams.mlx_available
+                          : trainingParams.use_cuda
+                      }
                       className="sr-only peer"
-                      disabled={disabledChangeParams || !cudaAvailable}
+                      disabled={
+                        disabledChangeParams || trainingParams.apple_silicon || !cudaAvailable
+                      }
                       onChange={(e) => {
                         updateTrainingParams({ ...trainingParams, use_cuda: e.target.checked });
                       }}
@@ -408,59 +522,23 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
                     <span
                       className={`ms-3 text-sm font-medium ${!cudaAvailable ? 'text-gray-500' : 'text-gray-700'}`}
                     >
-                      {trainingParams.use_cuda ? 'Enabled' : 'Disabled'}
+                      {trainingParams.apple_silicon
+                        ? trainingParams.mlx_available
+                          ? 'MLX (Automatic)'
+                          : 'MLX unavailable'
+                        : trainingParams.use_cuda
+                          ? 'Enabled'
+                          : 'Disabled'}
                     </span>
                   </label>
                 </div>
                 <div className="text-xs text-gray-500">
-                  {cudaAvailable
-                    ? 'Enable for faster training on NVIDIA GPUs.'
-                    : 'CUDA acceleration is not available on this system.'}
+                  {trainingParams.apple_silicon
+                    ? 'MLX trains on the Apple GPU automatically.'
+                    : cudaAvailable
+                      ? 'Enable for faster training on NVIDIA GPUs.'
+                      : 'CUDA acceleration is not available on this system.'}
                 </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-3">
-            <div className="text-base font-semibold text-gray-800 flex items-center">
-              Step 4: Configure Advanced Behavior
-            </div>
-
-            <div className="flex mr-auto gap-2 items-center ">
-              <Checkbox
-                checked={trainingParams.is_cot}
-                disabled={disabledChangeParams}
-                onChange={(e) => {
-                  e.stopPropagation();
-
-                  if (!thinkingConfigComplete) {
-                    setShowThinkingWarning(true);
-
-                    if (!showThinkingWarning) {
-                      setTimeout(() => setShowThinkingWarning(false), 2000);
-                    }
-
-                    return;
-                  }
-
-                  updateTrainingParams({ ...trainingParams, is_cot: e.target.checked });
-                }}
-              />
-              <div
-                className={classNames(
-                  `text-sm font-medium px-4 py-2 bg-white border rounded-md cursor-pointer transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)]`,
-                  showThinkingWarning
-                    ? 'border-red-500 text-red-600 bg-red-50 shadow-[0_0_0_2px_rgba(220,38,38,0.4)] animate-pulse'
-                    : 'border-gray-300 text-gray-700 hover:bg-gray-50',
-                  disabledChangeParams && 'opacity-50 !cursor-not-allowed'
-                )}
-                onClick={() => {
-                  if (disabledChangeParams) return;
-
-                  setOpenThinkingModel(true);
-                }}
-              >
-                Thinking Model
               </div>
             </div>
           </div>
@@ -495,8 +573,6 @@ const TrainingConfiguration: React.FC<TrainingConfigurationProps> = ({
           </button>
         </div>
       </div>
-
-      <ThinkingModelModal onClose={() => setOpenThinkingModel(false)} open={openThinkingModel} />
     </div>
   );
 };

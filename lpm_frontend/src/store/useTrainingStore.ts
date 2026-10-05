@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { AxiosResponse } from 'axios';
 import {
   getServiceStatus,
   getTrainProgress,
@@ -35,7 +36,7 @@ interface ModelState {
   setStatus: (status: ModelStatus) => void;
   setError: (error: boolean) => void;
   setIsTraining: (isTraining: boolean) => void;
-  fetchServiceStatus: () => Promise<CommonResponse<ServiceStatusRes>>;
+  fetchServiceStatus: () => Promise<AxiosResponse<CommonResponse<ServiceStatusRes>>>;
   setServiceStarting: (isStarting: boolean) => void;
   setServiceStopping: (isStopping: boolean) => void;
   setTrainingProgress: (progress: TrainProgress) => void;
@@ -151,7 +152,7 @@ export const useTrainingStore = create<ModelState>((set, get) => ({
 
     try {
       const res = await getTrainProgress({
-        model_name: config.model_name || 'Qwen2.5-0.5B-Instruct'
+        model_name: config.model_name || 'Qwen3-1.7B'
       });
 
       if (res.data.code === 0) {

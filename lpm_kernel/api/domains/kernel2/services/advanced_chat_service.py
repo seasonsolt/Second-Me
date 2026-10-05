@@ -4,9 +4,8 @@ Service for handling advanced chat mode with multiple phases
 
 import json
 import logging
-from typing import Optional, List, Dict, Any, Union, Iterator
+from typing import Dict, Any, Union, Iterator
 
-from lpm_kernel.api.services.local_llm_service import local_llm_service
 from lpm_kernel.api.services.expert_llm_service import expert_llm_service
 from lpm_kernel.api.domains.kernel2.dto.advanced_chat_dto import (
     AdvancedChatRequest,
@@ -34,13 +33,12 @@ class AdvancedChatService:
         
         # Convert AdvancedChatRequest to ChatRequest
         chat_request = ChatRequest(
-            message=request.requirement,
-            system_prompt="",  # Will be set by strategy
-            enable_l0_retrieval=request.enable_l0_retrieval,
-            enable_l1_retrieval=request.enable_l1_retrieval,
+            messages=[{"role": "user", "content": request.requirement}],
+            metadata={"enable_l0_retrieval": request.enable_l0_retrieval,
+                      "enable_l1_retrieval": request.enable_l1_retrieval},
             temperature=request.temperature
         )
-        logger.info(f"Created chat request with message: {chat_request.message[:100]}...")
+        logger.info(f"Created chat request with message: {request.requirement[:100]}...")
         
         # Use chat service with RequirementEnhancementStrategy
         logger.info("Calling chat service with RequirementEnhancementStrategy...")
@@ -61,8 +59,8 @@ class AdvancedChatService:
         logger.info(f"Input requirement: {requirement[:100]}...")
         
         chat_request = ChatRequest(
-            message=requirement,
-            system_prompt="",  # Will be set by strategy
+            messages=[{"role": "user", "content": requirement}],
+            metadata={"enable_l0_retrieval": False, "enable_l1_retrieval": False},
             temperature=temperature
         )
         
@@ -85,14 +83,14 @@ class AdvancedChatService:
         logger.info(f"Validating solution of length {len(solution)} characters...")
         
         chat_request = ChatRequest(
-            message=f"""
+            messages=[{"role": "user", "content": f"""
             Requirement:
             {requirement}
             
             Solution:
             {solution}
-            """,
-            system_prompt="",  # Will be set by strategy
+            """}],
+            metadata={"enable_l0_retrieval": False, "enable_l1_retrieval": False},
             temperature=0.2  # Lower temperature for more consistent validation
         )
         
@@ -121,8 +119,8 @@ class AdvancedChatService:
         logger.info(f"Formatting solution of length {len(solution)} characters...")
         
         chat_request = ChatRequest(
-            message=solution,
-            system_prompt="",  # Will be set by strategy
+            messages=[{"role": "user", "content": solution}],
+            metadata={"enable_l0_retrieval": False, "enable_l1_retrieval": False},
             temperature=0.3  # Lower temperature for more consistent formatting
         )
         
@@ -156,8 +154,9 @@ class AdvancedChatService:
         explaining the solution to the user."""
         
         chat_request = ChatRequest(
-            message=solution,
-            system_prompt=system_prompt,
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": solution}],
+            metadata={"enable_l0_retrieval": False, "enable_l1_retrieval": False},
             temperature=0.3  # use lower temp to keep stability
         )
         

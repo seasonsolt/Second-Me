@@ -50,6 +50,63 @@ class DocumentService:
         )
         return self._repository.create(doc)
 
+    def _invalidate_l1_summaries(self) -> None:
+        # Stale L1 is skipped by retrieval and training; status bios stay until L1 regenerates.
+        from lpm_kernel.models.l1 import L1Version
+        with DatabaseSession.session() as session:
+            session.query(L1Version).update({L1Version.status: "stale"})
+            session.commit()
+
+    def refresh_document_index(self, document_id: int, raw_content: Optional[str] = None):
+        """Refresh factual memory without analysis, GraphRAG or LoRA retraining.
+
+        A failed embedding leaves the document retryable, and removes outdated
+        vectors first so changed/deleted facts cannot keep being retrieved.
+        """
+        from lpm_kernel.file_data.chunker import DocumentChunker
+        from lpm_kernel.file_data.models import ChunkModel
+        from lpm_kernel.configs.config import Config
+        document = self._repository.find_one(document_id)
+        if not document:
+            raise ValueError("Document not found")
+        content = document.raw_content if raw_content is None else raw_content
+        if not content or not content.strip():
+            raise ValueError("Document content cannot be empty")
+        config = Config.from_env()
+        chunks = DocumentChunker(
+            chunk_size=int(config.get("DOCUMENT_CHUNK_SIZE") or 1000),
+            overlap=int(config.get("DOCUMENT_CHUNK_OVERLAP") or 200),
+        ).split(content)
+        self.embedding_service.delete_document_index(document_id)
+        self._invalidate_l1_summaries()
+        with self._repository._db.session() as session:
+            model = session.get(Document, document_id)
+            model.raw_content = content
+            model.embedding_status = ProcessStatus.INITIALIZED
+            if raw_content is not None:
+                model.insight = None
+                model.summary = None
+                model.analyze_status = ProcessStatus.INITIALIZED
+            session.query(ChunkModel).filter(ChunkModel.document_id == document_id).delete()
+            from sqlalchemy import func
+            # Existing SQLite databases may have BIGINT primary keys, which do
+            # not gain rowid autoincrement merely by updating the ORM type.
+            next_id = (session.query(func.max(ChunkModel.id)).scalar() or 0) + 1
+            session.add_all([ChunkModel(id=next_id + index, document_id=document_id,
+                                        content=chunk.content, tags=chunk.tags, topic=chunk.topic)
+                             for index, chunk in enumerate(chunks)])
+            session.commit()
+        try:
+            embedding = self.process_document_embedding(document_id)
+            embedded_chunks = self.generate_document_chunk_embeddings(document_id)
+            if embedding is None or not embedded_chunks or not all(c.has_embedding for c in embedded_chunks):
+                raise RuntimeError("Memory indexing failed; retry the document indexing operation")
+            return {"document_id": document_id, "total_chunks": len(embedded_chunks)}
+        except Exception:
+            self.embedding_service.delete_document_index(document_id)
+            self._repository.update_embedding_status(document_id, ProcessStatus.FAILED)
+            raise
+
     def list_documents(self) -> List[Document]:
         """
         get all doc list
@@ -106,7 +163,7 @@ class DocumentService:
                     documents_dtos.append(saved_doc.to_dto())
                     logger.info(f"Successfully processed and saved: {file_path}")
 
-                except Exception as e:
+                except Exception:
                     # add detailed error log
                     logger.exception(
                         f"Error processing file {file_path}"
@@ -432,6 +489,7 @@ class DocumentService:
             chunks = self._repository.find_chunks(document_id)
             chunk_ids = [str(chunk.id) for chunk in chunks]
 
+            self.embedding_service._ensure_current_model()
             # get embeddings from ChromaDB
             embeddings = {}
             if chunk_ids:
@@ -505,11 +563,12 @@ class DocumentService:
             Exception: error occurred
         """
         try:
+            self.embedding_service._ensure_current_model()
             results = self.embedding_service.document_collection.get(
                 ids=[str(document_id)], include=["embeddings"]
             )
 
-            if results and results["embeddings"]:
+            if results and results.get("embeddings") is not None and len(results["embeddings"]) > 0:
                 return results["embeddings"][0]
             return None
 
@@ -551,6 +610,10 @@ class DocumentService:
                 # get filepath
                 file_path = memory.path
                 
+                # Clear every model index before deleting the database record.
+                if document_id:
+                    self.embedding_service.delete_document_index(int(document_id))
+                    self._invalidate_l1_summaries()
                 # 2. delete memory
                 session.delete(memory)
                 session.commit()
@@ -574,29 +637,6 @@ class DocumentService:
                     logger.info(f"Deleted physical file: {file_path}")
                 return True
             
-            # 4. get all chunks
-            chunks = self._repository.find_chunks(document_id)
-            
-            # 5. delete doc embedding from ChromaDB
-            try:
-                self.embedding_service.document_collection.delete(
-                    ids=[str(document_id)]
-                )
-                logger.info(f"Deleted document embedding from ChromaDB, ID: {document_id}")
-            except Exception as e:
-                logger.error(f"Error deleting document embedding: {str(e)}")
-            
-            # 6. delete all chunk embedding from ChromaDB
-            if chunks:
-                try:
-                    chunk_ids = [str(chunk.id) for chunk in chunks]
-                    self.embedding_service.chunk_collection.delete(
-                        ids=chunk_ids
-                    )
-                    logger.info(f"Deleted {len(chunk_ids)} chunk embeddings from ChromaDB")
-                except Exception as e:
-                    logger.error(f"Error deleting chunk embeddings: {str(e)}")
-            
             # 7. delete all chunks embedding from ChromaDB
             with db._session_factory() as session:
                 from lpm_kernel.file_data.models import ChunkModel
@@ -604,7 +644,7 @@ class DocumentService:
                     ChunkModel.document_id == document_id
                 ).delete()
                 session.commit()
-                logger.info(f"Deleted all related chunks")
+                logger.info("Deleted all related chunks")
                 
                 # delete doc record
                 doc_entity = session.get(Document, document_id)

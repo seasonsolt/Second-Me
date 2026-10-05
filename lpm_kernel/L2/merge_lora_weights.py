@@ -23,7 +23,7 @@ from lpm_kernel.L2.memory_manager import get_memory_manager
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-def merge_lora_weights(base_model_path, lora_adapter_path, output_model_path):
+def merge_lora_weights(base_model_path, lora_adapter_path, output_model_path, use_cuda=None):
     """Merge LoRA weights into a base model and save the result.
     
     This function loads a base model and a LoRA adapter, merges them together,
@@ -45,7 +45,7 @@ def merge_lora_weights(base_model_path, lora_adapter_path, output_model_path):
                    f"available: {memory_info['ram_available_gb']:.2f}GB")
         
         # Determine if CUDA is available and should be used
-        use_cuda = memory_manager.cuda_available
+        use_cuda = memory_manager.cuda_available if use_cuda is None else bool(use_cuda and memory_manager.cuda_available)
         device = "cuda" if use_cuda else "cpu"
         
         if use_cuda:
@@ -164,11 +164,12 @@ def parse_arguments():
         required=True,
         help="Path to save the merged model.",
     )
+    parser.add_argument("--use-cuda", action=argparse.BooleanOptionalAction, default=None, help="Respect an explicit GPU selection during merge")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_arguments()
     merge_lora_weights(
-        args.base_model_path, args.lora_adapter_path, args.output_model_path
+        args.base_model_path, args.lora_adapter_path, args.output_model_path, use_cuda=args.use_cuda
     )

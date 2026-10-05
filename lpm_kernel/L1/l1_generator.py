@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 import logging
 import os
 
-from openai import OpenAI
+from lpm_kernel.common.performance import create_synthesis_client
 
 from lpm_kernel.L1.bio import (
     Bio,
@@ -180,7 +180,7 @@ class L1Generator:
             "frequency_penalty": 0,
             "seed": 42,
             "presence_penalty": 0,
-            "timeout": 45,
+            "timeout": 180,
         }
         self.user_llm_config_service = UserLLMConfigService()
         self.user_llm_config = self.user_llm_config_service.get_available_llm()
@@ -188,7 +188,8 @@ class L1Generator:
             self.client = None
             self.model_name = None
         else:
-            self.client = OpenAI(
+            self.client = create_synthesis_client(
+                "l1_biography",
                 api_key=self.user_llm_config.chat_api_key,
                 base_url=self.user_llm_config.chat_endpoint,
             )

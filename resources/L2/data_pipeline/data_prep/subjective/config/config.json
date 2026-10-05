@@ -1,17 +1,6 @@
 {
     "query": [
         {
-            "type": "infoRecall",
-            "prompt": "When you ask about specific information mentioned earlier, you want to recall or clarify some content from your notes or previous conversations. Please pose the question clearly and specify the details or context you're inquiring about. The goal is for your AI assistant to retrieve or clarify that information from your prior knowledge or records. For example, you can ask, 'What were the suggestions for optimizing the marketing strategy in last week's meeting?' or 'Can you remind me of the key points we discussed about product development?'",
-            "requiredAnswerTypes": [
-                "infoBased"
-            ],
-            "optionalAnswerTypes": [
-                "guide"
-            ],
-            "weight": 1
-        },
-        {
             "type": "suggestionRequest",
             "prompt": "When you seek advice or recommendations, the goal is to request suggestions related to personal preferences, background, or previous experiences. Clearly specify what type of recommendation you're seeking, such as books, travel destinations, or strategies, and provide relevant background information to help the AI assistant give a more personalized response. For example, you can ask, 'Can you recommend a book about leadership in tech companies?' or 'What is a quiet, relaxing mountain travel destination?'",
             "requiredAnswerTypes": [
@@ -56,7 +45,7 @@
                 "guide"
             ],
             "optionalAnswerTypes": [],
-            "weight": 1
+            "weight": 0.25
         },
         {
             "type": "global",
@@ -68,7 +57,7 @@
                 "suggestion",
                 "guide"
             ],
-            "weight": 4
+            "weight": 1
         }
     ],
     "answer": [

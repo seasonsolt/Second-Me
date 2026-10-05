@@ -124,10 +124,10 @@ install_python_dependency() {
         return 1
     fi
     
-    # Update lockfile and install dependencies
-    log_info "Updating Poetry lockfile..."
-    if ! poetry lock --no-cache; then
-        log_error "Failed to update Poetry lockfile"
+    # Install the checked-in dependency versions.
+    log_info "Checking Poetry lockfile..."
+    if ! poetry check --lock; then
+        log_error "Missing or outdated lockfile; run poetry lock before setup"
         return 1
     fi
     
@@ -204,11 +204,26 @@ install_graphrag() {
     GRAPHRAG_TARGET="1.2.1.dev27"
     GRAPHRAG_LOCAL_PATH="dependencies/graphrag-${GRAPHRAG_TARGET}.tar.gz"
 
-    if [ "$GRAPHRAG_VERSION" != "$GRAPHRAG_TARGET" ]; then
-        log_info "Installing correct version of graphrag in Poetry environment..."
+    if [ ! -f "$GRAPHRAG_LOCAL_PATH" ]; then
+        log_error "Local GraphRAG package not found: $GRAPHRAG_LOCAL_PATH"
+        return 1
+    fi
+    local package_hash=$(poetry run python -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1], "rb"), "sha256").hexdigest())' "$GRAPHRAG_LOCAL_PATH")
+    local package_marker="$(poetry run python -c 'import sys; print(sys.prefix)')/.secondme-graphrag.sha256"
+    # This ZIP uses dynamic versioning; its filename is not the installed version.
+    if [[ -z "$GRAPHRAG_VERSION" || ! -f "$package_marker" || "$(cat "$package_marker" 2>/dev/null)" != "$package_hash" ]]; then
+        log_info "Installing patched GraphRAG archive in Poetry environment..."
         if [ -f "$GRAPHRAG_LOCAL_PATH" ]; then
             log_info "Installing graphrag from local file using Poetry..."
-            if ! poetry run pip install --force-reinstall "$GRAPHRAG_LOCAL_PATH"; then
+            local install_path="$GRAPHRAG_LOCAL_PATH"
+            local package_tmp=""
+            if poetry run python -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$GRAPHRAG_LOCAL_PATH"; then
+                package_tmp=$(mktemp -d)
+                install_path="$package_tmp/graphrag-${GRAPHRAG_TARGET}.zip"
+                cp "$GRAPHRAG_LOCAL_PATH" "$install_path"
+            fi
+            if ! poetry run pip install --no-deps --force-reinstall "$install_path"; then
+                [[ -z "$package_tmp" ]] || rm -rf "$package_tmp"
                 log_error "Failed to install graphrag from local file"
                 return 1
             fi
@@ -217,9 +232,13 @@ install_graphrag() {
             log_error "Please ensure the graphrag package exists in the dependencies directory"
             return 1
         fi
-        log_success "Graphrag installed successfully"
+        [[ -z "$package_tmp" ]] || rm -rf "$package_tmp"
+        local installed_version=$(poetry run python -c 'from importlib.metadata import version; print(version("graphrag"))')
+        [[ -n "$installed_version" ]] || return 1
+        printf '%s\n' "$package_hash" > "$package_marker"
+        log_success "Patched GraphRAG installed successfully (metadata version: $installed_version)"
     else
-        log_success "Graphrag version is correct, skipping installation"
+        log_success "Patched GraphRAG archive hash matches, skipping installation"
     fi
     
     return 0
@@ -229,79 +248,12 @@ install_graphrag() {
 build_llama() {
     log_section "BUILDING LLAMA.CPP"
     
-    LLAMA_LOCAL_ZIP="dependencies/llama.cpp.zip"
-    
-    # Check if llama.cpp directory exists
-    if [ ! -d "llama.cpp" ]; then
-        log_info "Setting up llama.cpp..."
-        
-        if [ -f "$LLAMA_LOCAL_ZIP" ]; then
-            log_info "Using local llama.cpp archive..."
-            if ! unzip -q "$LLAMA_LOCAL_ZIP"; then
-                log_error "Failed to extract local llama.cpp archive"
-                return 1
-            fi
-        else
-            log_error "Local llama.cpp archive not found at: $LLAMA_LOCAL_ZIP"
-            log_error "Please ensure the llama.cpp.zip file exists in the dependencies directory"
-            return 1
-        fi
-    else
-        log_info "Found existing llama.cpp directory"
+    local backend=cpu
+    if [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]; then
+        backend=metal
     fi
-    
-    # Check if llama.cpp has been successfully compiled
-    if [ -f "llama.cpp/build/bin/llama-server" ]; then
-        log_info "Found existing llama-server build"
-        # Check if executable file can be run and get version info
-        if version_output=$(./llama.cpp/build/bin/llama-server --version 2>&1) && [[ $version_output == version:* ]]; then
-            log_success "Existing llama-server build is working properly (${version_output}), skipping compilation"
-            return 0
-        else
-            log_warning "Existing build seems broken or incompatible, will recompile..."
-        fi
-    fi
-    
-    # Enter llama.cpp directory and build
-    cd llama.cpp
-    
-    # Clean previous build
-    if [ -d "build" ]; then
-        log_info "Cleaning previous build..."
-        rm -rf build
-    fi
-    
-    # Create and enter build directory
-    log_info "Creating build directory..."
-    mkdir -p build && cd build
-    
-    # Configure CMake
-    log_info "Configuring CMake..."
-    if ! cmake ..; then
-        log_error "CMake configuration failed"
-        cd ../..
-        return 1
-    fi
-    
-    # Build project
-    log_info "Building project..."
-    if ! cmake --build . --config Release; then
-        log_error "Build failed"
-        cd ../..
-        return 1
-    fi
-    
-    # Check build result
-    if [ ! -f "bin/llama-server" ]; then
-        log_error "Build failed: llama-server executable not found"
-        log_error "Expected at: bin/llama-server"
-        cd ../..
-        return 1
-    fi
-    
-    log_success "Found llama-server at: bin/llama-server"
-    cd ../..
-    log_section "LLAMA.CPP BUILD COMPLETE"
+    bash scripts/build_llama.sh "$backend"
+
 }
 
 # Set up frontend environment

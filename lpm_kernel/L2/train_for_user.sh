@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Exit when training fails; the Web workflow must not advance to merge.
+set -euo pipefail
+
 # Initialize variables
 LEARNING_RATE="2e-4"
 NUM_TRAIN_EPOCHS="3"
@@ -8,6 +11,12 @@ DATA_SYNTHESIS_MODE="low"
 HALF=False
 USE_CUDA=False  # Default to False, will be overridden by parameter
 IS_COT=False
+# Optional overrides from the Web settings; defaults keep the legacy batch settings.
+# 4096 tokens fits the 4096-character reference-memory budget in training prompts.
+BATCH_SIZE="2"
+GRADIENT_ACCUMULATION_STEPS=""  # Empty means use CONCURRENCY_THREADS
+MAX_LENGTH="4096"
+GRADIENT_CHECKPOINTING=True
 
 # Process parameters
 while [[ "$#" -gt 0 ]]; do
@@ -28,10 +37,16 @@ while [[ "$#" -gt 0 ]]; do
             fi
             shift ;;
         --is_cot) IS_COT="$2"; shift ;;
+        --batch_size) BATCH_SIZE="$2"; shift ;;
+        --grad_accum) GRADIENT_ACCUMULATION_STEPS="$2"; shift ;;
+        --max_length) MAX_LENGTH="$2"; shift ;;
+        --grad_checkpoint) GRADIENT_CHECKPOINTING="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
 done
+
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-$CONCURRENCY_THREADS}"
 
 # Explicitly log the CUDA setting passed from the command line
 echo "CUDA parameter received: $USE_CUDA"
@@ -39,8 +54,8 @@ echo "CUDA parameter received: $USE_CUDA"
 # Verify CUDA availability if enabled
 if [[ "$USE_CUDA" == "True" ]]; then
     # Set CUDA environment variables to ensure PyTorch detects GPU
-    export CUDA_VISIBLE_DEVICES=0
-    echo "CUDA_VISIBLE_DEVICES set to 0"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
     
     # Set CUDA_LAUNCH_BLOCKING to 0 for async operations (better performance)
     export CUDA_LAUNCH_BLOCKING=0
@@ -59,6 +74,10 @@ echo "  Concurrency threads: $CONCURRENCY_THREADS"
 echo "  Data synthesis mode: $DATA_SYNTHESIS_MODE"
 echo "  Use CUDA: $USE_CUDA"
 echo "  Is chain of thought: $IS_COT"
+echo "  Batch size: $BATCH_SIZE"
+echo "  Gradient accumulation steps: $GRADIENT_ACCUMULATION_STEPS"
+echo "  Max sequence length: $MAX_LENGTH"
+echo "  Gradient checkpointing: $GRADIENT_CHECKPOINTING"
 
 # If concurrency threads are set, configure related environment variables
 if [ "$CONCURRENCY_THREADS" != "1" ]; then
@@ -72,7 +91,7 @@ if [ "$CONCURRENCY_THREADS" != "1" ]; then
 fi
 
 # Add BF16 option based on the platform and CUDA availability
-if [ "$PLATFORM" != "apple" ] && [ "$USE_CUDA" == "True" ]; then
+if [ "${PLATFORM:-}" != "apple" ] && [ "$USE_CUDA" == "True" ]; then
   HALF=True
   echo "Enabling BF16 half precision for non-Apple platform with CUDA"
 else
@@ -82,19 +101,19 @@ fi
 # Print environment for debugging
 echo "Environment configuration:"
 echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
-echo "  PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF}"
+echo "  PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-}"
 echo "  Using half precision: ${HALF}"
 
 # Execute training script with parameters from environment variables
-python lpm_kernel/L2/train.py \
+"${PYTHON_EXECUTABLE:-python}" lpm_kernel/L2/train.py \
   --seed 42 \
   --model_name_or_path "${MODEL_BASE_PATH}" \
   --user_name "${USER_NAME}" \
   --dataset_name "resources/L2/data/merged.json" \
-  --chat_template_format "chatml" \
+  --chat_template_format "none" \
   --add_special_tokens False \
   --append_concat_token False \
-  --max_seq_length 2048 \
+  --max_length "$MAX_LENGTH" \
   --num_train_epochs $NUM_TRAIN_EPOCHS \
   --save_total_limit 2 \
   --logging_steps 20 \
@@ -110,9 +129,9 @@ python lpm_kernel/L2/train.py \
   --weight_decay 1e-4 \
   --max_grad_norm 0.3 \
   --output_dir "${MODEL_PERSONAL_DIR}" \
-  --per_device_train_batch_size 2 \
-  --gradient_accumulation_steps $CONCURRENCY_THREADS \
-  --gradient_checkpointing True \
+  --per_device_train_batch_size "$BATCH_SIZE" \
+  --gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS" \
+  --gradient_checkpointing "$GRADIENT_CHECKPOINTING" \
   --use_reentrant False \
   --use_peft_lora True \
   --lora_r 8 \

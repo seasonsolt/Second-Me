@@ -23,7 +23,7 @@ Base = declarative_base()
 class ChunkModel(Base):
     __tablename__ = "chunk"
 
-    id = Column(BigInteger, primary_key=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
     document_id = Column(BigInteger, ForeignKey("document.id"), nullable=False)
     content = Column(Text, nullable=False)
     has_embedding = Column(Boolean, default=False)

@@ -53,7 +53,7 @@ class L0Generator:
         self.lf_prompt_doc_breakdown = insight_doc_breakdown
 
         self.max_retries_summarize = 2
-        self.timeout_summarize = 30
+        self.timeout_summarize = 180
 
         self.user_llm_config_service = UserLLMConfigService()
         self.user_llm_config = self.user_llm_config_service.get_available_llm()
@@ -572,7 +572,7 @@ class L0Generator:
                     bio=bio,
                     content=inputs.file_info.content,
                     max_retries=self.max_retries_summarize,
-                    request_timeout=30,
+                    request_timeout=180,
                     file_content=inputs.file_info.file_content,
                 )
             elif datatype == DataType.AUDIO:
@@ -580,7 +580,7 @@ class L0Generator:
                     bio=bio,
                     content=inputs.file_info.content,
                     max_retries=self.max_retries_summarize,
-                    request_timeout=45,
+                    request_timeout=180,
                     file_content=inputs.file_info.file_content,
                 )
             else:
@@ -588,7 +588,7 @@ class L0Generator:
                     bio=bio,
                     content=inputs.file_info.content,
                     max_retries=self.max_retries_summarize,
-                    request_timeout=45,
+                    request_timeout=180,
                     file_content=inputs.file_info.file_content,
                 )
         else:

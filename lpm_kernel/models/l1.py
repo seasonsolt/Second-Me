@@ -3,8 +3,11 @@ from sqlalchemy.orm import relationship
 from lpm_kernel.common.repository.database_session import Base
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, TYPE_CHECKING
 from lpm_kernel.L1.bio import Bio
+
+if TYPE_CHECKING:
+    from lpm_kernel.models.status_biography import StatusBiography
 
 
 class L1Version(Base):
@@ -143,9 +146,10 @@ class GlobalBioDTO:
     summary_third_view: str
     create_time: datetime
     shades: List[Dict] = None  # add shades field
+    status: str = ""
 
     @classmethod
-    def from_model(cls, model: "L1Bio") -> "GlobalBioDTO":
+    def from_model(cls, model: "L1Bio", shades=None, status="") -> "GlobalBioDTO":
         """
         Create DTO from database model
 
@@ -161,7 +165,12 @@ class GlobalBioDTO:
             summary=model.summary,
             summary_third_view=model.summary_third_view,
             create_time=model.create_time,
-            shades=[],  # initialize as empty list
+            status=status,
+            shades=[{
+                "id": shade.id, "title": shade.name or "",
+                "description": shade.desc_second_view or shade.desc_third_view or "",
+                "content": shade.content_second_view or shade.content_third_view or "",
+            } for shade in (shades or [])],
         )
 
     def to_dict(self) -> dict:

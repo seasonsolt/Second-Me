@@ -1,14 +1,14 @@
-from itertools import islice
 import concurrent.futures
 import json
 import os
 import random
 import re
 from tqdm import tqdm
-import openai
 from enum import Enum
+from lpm_kernel.L2.memory_prompt import bounded_memory_content
+from lpm_kernel.L2.data_pipeline.data_prep.synthesis_config import get_synthesis_workers
+from lpm_kernel.common.performance import create_synthesis_client
 from lpm_kernel.api.services.user_llm_config_service import UserLLMConfigService
-from lpm_kernel.configs.config import Config
 from lpm_kernel.L2.data_pipeline.data_prep.preference.prompts import (
     CH_USR_TEMPLATES, CH_USR_COT_TEMPLATES,
     EN_USR_TEMPLATES, EN_USR_COT_TEMPLATES,
@@ -77,7 +77,8 @@ class PreferenceQAGenerator:
         else:
             self.model_name = user_llm_config.chat_model_name
     
-            self.client = openai.OpenAI(
+            self.client = create_synthesis_client(
+                "preference",
                 api_key=user_llm_config.chat_api_key,
                 base_url=user_llm_config.chat_endpoint,
             )
@@ -87,9 +88,9 @@ class PreferenceQAGenerator:
             self.api_key = user_llm_config.thinking_api_key
             self.base_url = user_llm_config.thinking_endpoint
             if self.model_name.startswith("deepseek"):
-                self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = create_synthesis_client("preference", api_key=self.api_key, base_url=self.base_url)
             else:
-                logger.error(f"Error model_name, longcot data generating model_name: deepseek series")
+                logger.error("Error model_name, longcot data generating model_name: deepseek series")
                 raise
             
         
@@ -98,7 +99,7 @@ class PreferenceQAGenerator:
         self.preference_language = preference_language
         self.prompt_templates = self._get_prompt_templates(preference_language)
         self.sys_templates = self._get_sys_templates(preference_language)
-        self.max_workers = 1
+        self.max_workers = get_synthesis_workers()
         self.data_synthesis_mode = os.environ.get("DATA_SYNTHESIS_MODE", "low")
 
 
@@ -112,48 +113,15 @@ class PreferenceQAGenerator:
         Returns:
             The generated response text or None if an error occurred.
         """
-        def get_remote_response(sys: str, prompt: str) -> str:
-            """Get response from OpenAI / DeepSeek API.
-            
-            Args:
-                sys: The system prompt to use.
-                prompt: The user prompt to send to the API.
-                
-            Returns:
-                The response content from OpenAI / DeepSeek, or None if an error occurs.
-            """
-            try:
-                res = self.client.chat.completions.create(
-                    messages=[
-                            {"role": "system", "content": sys},
-                            {"role": "user", "content": prompt},
-                        ],
-                    model=self.model_name,
-                )
-                response_message = res.choices[0].message
-                if self.is_cot:
-                    return "<think>" + response_message.reasoning_content + "</think>" + response_message.content
-                else:
-                    return response_message.content
-            except Exception as e:
-                logger.error(traceback.format_exc())
-            return None
-        
-        
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                future = executor.submit(
-                    self.client.chat.completions.create,
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": sys},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                response = future.result()
-                return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "system", "content": sys},
+                          {"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content
+        except Exception as error:
+            logger.error("Error generating response: %s", error)
             return None
 
 
@@ -215,13 +183,12 @@ class PreferenceQAGenerator:
 
     def process_clusters(self, output_filename: str) -> None:
         """Process clusters and generate questions and answers.
-        
+
         Args:
             output_filename: Path to save the generated Q&A pairs.
         """
         cluster_items = list(self.pre_msg.items())
-        count = 0
-        
+
         if self.data_synthesis_mode == "low":
             sample_num = max(1, len(cluster_items) // LowMode.cluster_nums.value) if 0 < len(cluster_items) < 3 else len(cluster_items) // LowMode.cluster_nums.value
             new_cluster_items = random.sample(cluster_items, sample_num)
@@ -230,57 +197,68 @@ class PreferenceQAGenerator:
             new_cluster_items = random.sample(cluster_items, sample_num)
         else: # high or other case
             new_cluster_items = cluster_items
-            
-        for _, cluster in tqdm(new_cluster_items, desc="preference_generate", file=tqdm_handler):
-            chunk_concat = self._get_chunk_concat(cluster["contents"])
 
-            tags = " ".join(cluster["tags"])
-
-            if len(chunk_concat) < 20:
-                continue
-            count += 1
-            
-            n_cluster = len(cluster["contents"])
-            if n_cluster > 1:
-                logger.info(f"Cluster has {str(n_cluster)} chunks")
-
-            prompt_question_template = self.prompt_templates["query"]
-            prompt_answer_template = self.prompt_templates["answer"]
-            sys_question = self.sys_templates["query"]
-            sys_answer = self.sys_templates["answer"]
-
-            try:
-                gen_question = self.generate_response(
-                    sys_question,
-                    prompt_question_template.format(
-                        bio=self.bio, chunks_concat=chunk_concat
-                    ),
-                )
-                if self.is_cot:
-                    question_match = re.search(r"<question>(.*?)</question>", gen_question, re.DOTALL)
-                    gen_question = question_match.group(1).strip() if question_match else gen_question
-            except Exception as e:
-                logger.error(traceback.format_exc())
-                continue
-            try:
-                gen_answer = self.generate_response(
-                    sys_answer,
-                    prompt_answer_template.format(
-                        question=gen_question, bio=self.bio, chunks_concat=chunk_concat
-                    ),
-                )
-            except Exception as e:
-                logger.error(traceback.format_exc())
-                continue
-            
-            self.question_list.append({"user": gen_question, "assistant": gen_answer})
-            if n_cluster >= 20:
-                self._generate_multiple_questions(cluster["contents"], chunk_concat)
-            if count % 5 == 0:
-                logger.info(f"Processed {count} clusters")
-
-        with open(output_filename, "w") as json_file:
+        # One pool owns concurrency. Each worker performs its Q/A chain and
+        # large-cluster augmentation sequentially; no per-request nested pool.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = executor.map(self._process_cluster, [cluster for _, cluster in new_cluster_items])
+            for samples in tqdm(results, total=len(new_cluster_items), desc="preference_generate", file=tqdm_handler):
+                self.question_list.extend(samples)
+        with open(output_filename, "w", encoding="utf-8") as json_file:
             json.dump(self.question_list, json_file, indent=4, ensure_ascii=False)
+
+    def _process_cluster(self, cluster: dict) -> list:
+        """Generate a cluster's ordered samples inside one synthesis worker."""
+        chunk_concat = self._get_chunk_concat(cluster["contents"])
+
+
+        if len(chunk_concat) < 20:
+            return []
+
+        n_cluster = len(cluster["contents"])
+        if n_cluster > 1:
+            logger.info(f"Cluster has {str(n_cluster)} chunks")
+
+        data = []
+        reference = bounded_memory_content(f"{self.bio}\n{chunk_concat}")
+        prompt_question_template = self.prompt_templates["query"]
+        prompt_answer_template = self.prompt_templates["answer"]
+        sys_question = self.sys_templates["query"]
+        sys_answer = self.sys_templates["answer"]
+
+        try:
+            gen_question = self.generate_response(
+                sys_question,
+                prompt_question_template.format(
+                    bio="", chunks_concat=reference
+                ),
+            )
+            if self.is_cot:
+                question_match = re.search(r"<question>(.*?)</question>", gen_question, re.DOTALL)
+                gen_question = question_match.group(1).strip() if question_match else gen_question
+        except Exception:
+            logger.error(traceback.format_exc())
+            return []
+        try:
+            gen_answer = self.generate_response(
+                sys_answer + "\nExpress the user’s style, preferences and value judgments; "
+                "use provided references for facts and do not invent personal events.",
+                prompt_answer_template.format(
+                    question=gen_question, bio="", chunks_concat=reference
+                ),
+            )
+        except Exception:
+            logger.error(traceback.format_exc())
+            return []
+
+        if not gen_question or not gen_answer:
+            return []
+        data.append({"user": gen_question, "assistant": gen_answer,
+                                   "training_type": "preference_with_context",
+                                   "context": reference, "memory_format_version": 1})
+        if n_cluster >= 20:
+            data.extend(self._generate_multiple_questions(cluster["contents"], chunk_concat))
+        return data
 
 
     def _get_chunk_concat(self, contents: list) -> str:
@@ -300,13 +278,14 @@ class PreferenceQAGenerator:
         return chunk_concat
 
 
-    def _generate_multiple_questions(self, contents: list, chunk_concat: str) -> None:
+    def _generate_multiple_questions(self, contents: list, chunk_concat: str) -> list:
         """Generate multiple questions and answers for larger clusters.
         
         Args:
             contents: List of content chunks.
             chunk_concat: Concatenated text chunks.
         """
+        data = []
         num_chunk_referred = 30
         n_repeat = max(1, int(len(contents) * 1 / num_chunk_referred))
         chunk_content_list = [
@@ -324,6 +303,7 @@ class PreferenceQAGenerator:
                 chunk_content_list, min(len(chunk_content_list), num_chunk_referred)
             )
             chunk_concat = "\n".join(selected_chunks)
+            reference = bounded_memory_content(f"{self.bio}\n{chunk_concat}")
             prompt_question_template = self.prompt_templates["query"]
             prompt_answer_template = self.prompt_templates["answer"]
             sys_question = self.sys_templates["query"]
@@ -333,20 +313,25 @@ class PreferenceQAGenerator:
                 gen_question = self.generate_response(
                     sys_question,
                     prompt_question_template.format(
-                        bio=self.bio, chunks_concat=chunk_concat
+                        bio="", chunks_concat=reference
                     ),
                 )
                 if self.is_cot:
                     question_match = re.search(r"<question>(.*?)</question>", gen_question, re.DOTALL)
                     gen_question = question_match.group(1).strip() if question_match else gen_question
                 gen_answer = self.generate_response(
-                    sys_answer,
+                    sys_answer + "\nExpress the user’s style, preferences and value judgments; "
+                    "use provided references for facts and do not invent personal events.",
                     prompt_answer_template.format(
-                        question=gen_question, chunks_concat=chunk_concat, bio=self.bio
+                        question=gen_question, chunks_concat=reference, bio=""
                     ),
                 )
-            except Exception as e:
+            except Exception:
                 logger.error(traceback.format_exc())
                 continue
-            self.question_list.append({"user": gen_question, "assistant": gen_answer})
-        return
+            if not gen_question or not gen_answer:
+                continue
+            data.append({"user": gen_question, "assistant": gen_answer,
+                                       "training_type": "preference_with_context",
+                                       "context": reference, "memory_format_version": 1})
+        return data

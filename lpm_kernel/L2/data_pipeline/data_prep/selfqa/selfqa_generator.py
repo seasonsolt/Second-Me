@@ -2,15 +2,16 @@ import concurrent.futures
 import traceback
 import os
 import random
-import openai
 from tqdm import tqdm
 from enum import Enum
+from lpm_kernel.L2.memory_prompt import bounded_memory_content
+from lpm_kernel.L2.data_pipeline.data_prep.synthesis_config import get_synthesis_workers
+from lpm_kernel.common.performance import create_synthesis_client
 from lpm_kernel.L2.data_pipeline.data_prep.selfqa.selfqa_prompt import (
     system_prompt_cn, system_cot_prompt_cn,
     system_prompt_en, system_cot_prompt_en
 )
 from lpm_kernel.api.services.user_llm_config_service import UserLLMConfigService
-from lpm_kernel.configs.config import Config
 from lpm_kernel.configs.logging import get_train_process_logger
 logger = get_train_process_logger()
 
@@ -63,8 +64,9 @@ class SelfQA:
             preferred_language: User's preferred language, 'en' for English, default is 'en'.
         """
         self.user_name = user_name
-        self.user_input_introduction = user_input_introduction
-        self.user_global_bio = user_global_bio
+        self.context = bounded_memory_content(f"Name: {user_name}\n{user_input_introduction}\n{user_global_bio}")
+        self.user_input_introduction = ""
+        self.user_global_bio = self.context
         self.preferred_language = preferred_language
         self.is_cot = is_cot
         user_llm_config_service = UserLLMConfigService()
@@ -75,11 +77,12 @@ class SelfQA:
         else:
             self.model_name = user_llm_config.chat_model_name
     
-            self.client = openai.OpenAI(
+            self.client = create_synthesis_client(
+                "selfqa",
                 api_key=user_llm_config.chat_api_key,
                 base_url=user_llm_config.chat_endpoint,
             )
-        self.max_workers = os.environ.get("concurrency_threads", 2)
+        self.max_workers = get_synthesis_workers()
         self.data_synthesis_mode = os.environ.get("DATA_SYNTHESIS_MODE", "low")
         if self.is_cot:
             logger.info("generate selfQA data in longcot pattern!!!")
@@ -87,9 +90,9 @@ class SelfQA:
             self.api_key = user_llm_config.thinking_api_key
             self.base_url = user_llm_config.thinking_endpoint
             if self.model_name.startswith("deepseek"):
-                self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = create_synthesis_client("selfqa", api_key=self.api_key, base_url=self.base_url)
             else:
-                logger.error(f"Error model_name, longcot data generating model_name: deepseek series")
+                logger.error("Error model_name, longcot data generating model_name: deepseek series")
                 raise
 
 
@@ -107,7 +110,8 @@ class SelfQA:
             "What do you see when you think of me?",
             "What defines who I am?",
             "How would you explain my personality?",
-            "Can you help me understand who I really am?" "Who are you?",
+            "Can you help me understand who I really am?",
+            "Who are you?",
             "Can you tell me about yourself?",
             "What's your purpose or role here?",
             "How would you define yourself?",
@@ -211,7 +215,8 @@ class SelfQA:
             if a is None:
                 return None
             
-            return {"user": q, "assistant": a}
+            return {"user": q, "assistant": a, "training_type": "identity_with_context",
+                    "context": self.context, "memory_format_version": 1}
 
         # Use ThreadPoolExecutor with max_workers=self.max_workers
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -246,6 +251,6 @@ class SelfQA:
                 return "<think>" + response_message.reasoning_content + "</think>" + response_message.content
             else:
                 return response_message.content
-        except Exception as e:
+        except Exception:
             logger.error(traceback.format_exc())
         return None

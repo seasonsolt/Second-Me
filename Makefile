@@ -256,13 +256,13 @@ docker-restart-backend-fast:
 	$(DOCKER_COMPOSE_CMD) -f $(DOCKER_COMPOSE_FILE) stop backend
 	@echo "Removing backend container..."
 	$(DOCKER_COMPOSE_CMD) -f $(DOCKER_COMPOSE_FILE) rm -f backend
-	@echo "Building backend image with build-arg to skip llama.cpp build..."
+	@echo "Building backend image with revision-checked llama.cpp cache..."
 ifeq ($(wildcard .gpu_selected),)
 	@echo "Using CPU configuration (docker-compose.yml)..."
 else
 	@echo "Using GPU configuration (docker-compose-gpu.yml)..."
 endif
-	$(DOCKER_COMPOSE_CMD) -f $(DOCKER_COMPOSE_FILE) build --build-arg SKIP_LLAMA_BUILD=true backend || { echo "$(COLOR_RED)❌ Backend build failed! Aborting operation...$(COLOR_RESET)"; exit 1; }
+	$(DOCKER_COMPOSE_CMD) -f $(DOCKER_COMPOSE_FILE) build backend || { echo "$(COLOR_RED)❌ Backend build failed! Aborting operation...$(COLOR_RESET)"; exit 1; }
 	@echo "Starting backend container..."
 	$(DOCKER_COMPOSE_CMD) -f $(DOCKER_COMPOSE_FILE) up -d backend
 	@echo "Backend container smart-restarted successfully"

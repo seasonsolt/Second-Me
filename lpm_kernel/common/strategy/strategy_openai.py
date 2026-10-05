@@ -7,29 +7,35 @@ from lpm_kernel.configs.logging import get_train_process_logger
 logger = get_train_process_logger()
 import requests
 
+# Providers cap total tokens per request (e.g. Cloudflare bge-m3: 60k), so a large
+# document must not be sent as a single request.
+EMBEDDING_BATCH_SIZE = 8
+
 def openai_strategy(user_llm_config: Optional[UserLLMConfigDTO], chunked_texts):
-    try:
-        headers = {
-            "Authorization": f"Bearer {user_llm_config.embedding_api_key}",
-            "Content-Type": "application/json",
+    headers = {
+        "Authorization": f"Bearer {user_llm_config.embedding_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    logger.info("Getting embeddings with model %s, total chunks: %d",
+                user_llm_config.embedding_model_name, len(chunked_texts))
+
+    embeddings = []
+    for start in range(0, len(chunked_texts), EMBEDDING_BATCH_SIZE):
+        data = {
+            "input": chunked_texts[start:start + EMBEDDING_BATCH_SIZE],
+            "model": user_llm_config.embedding_model_name,
         }
-
-        data = {"input": chunked_texts, "model": user_llm_config.embedding_model_name}
-
-        logger.info(f"Getting embedding for {data}, total chunks: {len(chunked_texts)}")
-
-        response = requests.post(
-            f"{user_llm_config.embedding_endpoint}/embeddings", headers=headers, json=data
-        )
-        response.raise_for_status()
-        result = response.json()
+        try:
+            response = requests.post(
+                f"{user_llm_config.embedding_endpoint}/embeddings", headers=headers, json=data
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            body = e.response.text[:500] if e.response is not None else ""
+            raise Exception(f"Failed to get embeddings: {str(e)} {body}") from e
 
         # Extract embedding vectors
-        embeddings = [item["embedding"] for item in result["data"]]
-        embeddings_array = np.array(embeddings)
+        embeddings.extend(item["embedding"] for item in response.json()["data"])
 
-        return embeddings_array
-
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to get embeddings: {str(e)}", exc_info=True)
-
+    return np.array(embeddings)

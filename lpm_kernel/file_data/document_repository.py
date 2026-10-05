@@ -1,10 +1,10 @@
 from typing import List, Optional, Dict
-from sqlalchemy import select
+from sqlalchemy import select, func, text
 from lpm_kernel.common.repository.base_repository import BaseRepository
 from lpm_kernel.file_data.document import Document
 from lpm_kernel.file_data.process_status import ProcessStatus
 from lpm_kernel.file_data.document_dto import DocumentDTO
-from lpm_kernel.file_data.models import ChunkModel, DocumentModel
+from lpm_kernel.file_data.models import ChunkModel
 from .dto.chunk_dto import ChunkDTO
 import logging
 
@@ -63,6 +63,10 @@ class DocumentRepository(BaseRepository[Document]):
     def save_chunk(self, chunk: ChunkModel) -> ChunkModel:
         """save chunk"""
         with self._db.session() as session:
+            if session.bind.dialect.name == "sqlite" and chunk.id is None:
+                # Support existing BIGINT tables without a destructive migration.
+                session.execute(text("BEGIN IMMEDIATE"))
+                chunk.id = (session.query(func.max(ChunkModel.id)).scalar() or 0) + 1
             session.add(chunk)
             session.flush()  # get auto-gen ID
             session.refresh(chunk)
@@ -105,8 +109,8 @@ class DocumentRepository(BaseRepository[Document]):
         try:
             with self._db.session() as session:
                 document = (
-                    session.query(DocumentModel)
-                    .filter(DocumentModel.id == document_id)
+                    session.query(self.model)
+                    .filter(self.model.id == document_id)
                     .first()
                 )
                 if document:

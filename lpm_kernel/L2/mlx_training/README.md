@@ -1,99 +1,58 @@
-# MLX Training Support for Apple Silicon
+# Apple Silicon MLX training
 
-## Overview
+The Web training workflow selects MLX automatically on native macOS arm64. Linux and other platforms use the existing PyTorch CUDA/CPU path. Docker on a Mac runs Linux and does not provide native MLX or Metal training.
 
-We have integrated the MLX training framework for Apple Silicon to provide faster, more memory-efficient training capabilities. MLX is an array framework specifically designed for machine learning on Apple silicon, developed by Apple's machine learning research team.
+The default model is `Qwen/Qwen3-1.7B`. The larger option is `Qwen/Qwen3-4B-Instruct-2507`. Existing Qwen2.5 choices remain available. Each model uses its own native chat template; Qwen3 runs without thinking output. The Web workflow performs **SFT only**, and records `training_objective=sft` and `dpo_executed=false`.
 
-**Framework Source**: [ml-explore/mlx](https://github.com/ml-explore/mlx)
+## Setup and Web training
 
-While MLX is still under active development and doesn't yet offer the comprehensive features of frameworks like Transformers, it provides significant advantages for training on Apple Silicon devices.
+Run setup from the repository root with an arm64 Python 3.12 and an isolated project virtual environment. The checked-in Poetry lock fixes the tested Transformers, PEFT, TRL, MLX and MLX-LM versions. Setup installs the patched local GraphRAG package after resolving its dependencies and builds the llama.cpp revision from `dependencies/llama.cpp.version`.
 
-## Performance
+On the training screen, the default **Auto** backend selects MLX on Apple Silicon; if its dependencies are missing, training reports the error instead of silently falling back to CPU. The initial settings are batch size 1, gradient accumulation 1, maximum sequence length 2048 and gradient checkpointing enabled. Increase these only after measuring your model's memory use. The 4B option has not been fully trained in this upgrade's local acceptance run.
 
-Through our testing, we've confirmed that on machines with 32GB of memory, MLX can support 4-bit quantized QLora fine-tuning of 7B parameter models. This represents substantial memory efficiency compared to traditional training approaches.
+Training reads `resources/L2/data/merged.json`. Samples carry style/preferences and bounded reference context. Facts should come from retrieval; factual QA without the new memory-format marker is excluded when assembling the new dataset. Train/validation splitting keeps rewrites and turns sharing a source, document or context together. Only assistant completion tokens contribute to loss, and oversized samples fail preflight instead of being silently cut.
 
-## Getting Started
+Outputs follow the shared Web pipeline:
 
-### Prerequisites
+1. LoRA adapter: `resources/model/output/personal_model/<model>/`.
+2. `mlx_lm fuse` produces HF weights in `resources/model/output/merged_model/<model>/`.
+3. The pinned converter creates `resources/model/output/gguf/<model>/model.gguf`.
+4. The application's local service starts llama-server with Metal offload and the native nonthinking template.
 
-Before starting, you'll need to install the required dependencies via terminal:
+A failed or cancelled training run does not report successful completion. Fusion requires a completion marker identifying the matching base model. Cancellation targets the workflow's child process group.
+
+## CLI smoke run
+
+Download the original HF model into `resources/L2/base_models/Qwen3-1.7B`, then run from the repository root:
 
 ```bash
-pip install mlx-lm
+.venv/bin/python -m lpm_kernel.L2.mlx_training.train \
+  --model resources/L2/base_models/Qwen3-1.7B \
+  --output resources/model/output/personal_model/Qwen3-1.7B \
+  --data tests/fixtures/qwen3_training.json \
+  --epochs 1 --max-steps 2 --max-length 2048 --grad-checkpoint
+
+.venv/bin/python -m mlx_lm fuse \
+  --model resources/L2/base_models/Qwen3-1.7B \
+  --adapter-path resources/model/output/personal_model/Qwen3-1.7B \
+  --save-path resources/model/output/merged_model/Qwen3-1.7B
+
+mkdir -p resources/model/output/gguf/Qwen3-1.7B
+.venv/bin/python lpm_kernel/L2/convert_hf_to_gguf.py \
+  resources/model/output/merged_model/Qwen3-1.7B \
+  --outfile resources/model/output/gguf/Qwen3-1.7B/model.gguf --outtype f16
 ```
 
-### Model Selection
+`max_steps` counts MLX microbatches and must be divisible by gradient accumulation. The shell wrappers accept `PYTHON_EXECUTABLE`; they use the same training/conversion modules as the Web workflow.
 
-You can choose from a variety of pre-trained models available in the [MLX Community on Hugging Face](https://huggingface.co/mlx-community). This community hosts ready-to-use models specifically optimized for Apple Silicon, including various quantized versions of popular models.
+## Local acceptance evidence (2026-10-04)
 
-### Workflow
+On an M1 Max with 64 GB unified memory, the nonquantized Qwen3-1.7B two-step synthetic smoke run processed 51 training targets and 4 validation targets. MLX reported peak memory **3.942 GB**, training loss **11.402 → 8.250** and validation loss **7.969 → 7.315**. This verifies execution and finite loss, not personality quality or convergence.
 
-The training process involves the following steps:
+Fusion and the full F16 GGUF conversion succeeded. llama-server loaded all 29 layers onto Metal with an 8192-token context and one slot. Regular and streamed completions used an updated reference fact; oversized history was trimmed while preserving the current question. No thinking segment appeared in the returned content. See `docs/2026-upgrade-validation.md` for the wider acceptance record and remaining untested configurations.
 
-1. **Data Conversion**: 
-   Run the data conversion script to transform your previously processed training data into MLX-compatible format(run from the project root directory default):
-   ```bash
-   python lpm_kernel/L2/mlx_training/data_transform.py
-   ```
-   Before running the data conversion script, ensure that your raw data (`merged.json`) is located in the `resources/data/` directory. The converted data will be stored in the `resources/data/mlx_train_data` directory.
-   Please verify that the username, COT mode, and data read/write paths are correctly configured in the data conversion script.
-   You can customize the COT mode, username, and data paths in the script according to your preferences.
+## Performance controls and measured tradeoffs
 
-2. **Training**:
-   Execute the MLX training script to fine-tune your model (run from the project root directory default):
-   ```bash
-   ./lpm_kernel/L2/mlx_training/train_by_mlx.sh
-   ```
-   You can modify the train_by_mlx.sh script to use your selected model from the MLX Community.
+MLX groups training samples by length and randomizes the resulting batches to reduce padding without dropping remainder examples. Disable this with `--no-group-by-length` when comparing order effects. Validation keeps the original split order. The Web default evaluates up to four validation batches; use `--validation-batches -1` for full validation. Both controls are persisted with the training parameters.
 
-   You can start the training process using two methods: either by configuring the training parameters in a `.yaml` file or by specifying them directly in the command line. Both methods are demonstrated in the `train_by_mlx.sh` script. We recommend using the `.yaml` file method, especially for LoRA fine-tuning, as the LoRA parameters are only supported in the `.yaml` configuration.
-   
-   Additionally, if you encounter path errors during training, please verify that the paths in the `lora_config.yaml` file are correctly configured.
-
-
-3. **Model Conversion and Serving**:
-   Merge the adapter weights with the base model and start the model server (run from the project root directory):
-   ```bash
-   ./lpm_kernel/L2/mlx_training/convert_and_serve.sh
-   ```
-4. **Testing the Model**:
-   After serving the model, you can test it to verify that it responds correctly:
-   ```bash
-   python lpm_kernel/L2/mlx_training/test_mlx.py
-   ```
-   
-   This script sends a test request to the model server and displays the response. Note that the built-in prompt in the test script is configured for Felix Tao's Chain-of-Thought (COT) model. You should modify the prompt in the test script to match your specific training objectives and prompt format.
-   
-   Example of modifying the prompt in `test_mlx.py`:
-   ```python
-   payload = {
-       "messages": [
-           {
-               "role": "system",
-               "content": "Your custom system prompt here..."
-           },
-           {
-               "role": "user",
-               "content": "Your test question here"
-           }
-       ],
-       "temperature": 0.7
-   }
-   ```
-
-## Advantages
-
-- Optimized performance on Apple Silicon (M1/M2/M3 chips)
-- Reduced memory footprint
-- Faster training times
-- Support for quantized models
-
-## Limitations
-
-- MLX is still under development and lacks some features available in more established frameworks
-- Limited to Apple Silicon devices
-- Some model architectures may not be fully supported yet
-
-## Future Work
-
-We plan to continue enhancing our MLX integration as the framework matures, providing more features and improved performance over time.
+The [2026-10-05 performance report](../../../docs/2026-mlx-performance.md) and [machine-readable evidence](../../../docs/2026-mlx-performance.json) compare short examples and mixed 512–2048 token sequences on Qwen3-1.7B. Batch 4 without checkpointing was faster on the short fixture; long sequences had much higher memory use, so the Web defaults remain batch 1 with checkpointing enabled. The reports include timer scope, padding, allocator-memory limitations and quality caveats.

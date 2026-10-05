@@ -5,6 +5,7 @@ from charset_normalizer import from_path
 
 from lpm_kernel.api.domains.trainprocess.trainprocess_service import TrainProcessService
 from lpm_kernel.api.domains.trainprocess.training_params_manager import TrainingParamsManager
+from lpm_kernel.L2.mlx_training.backend import resolve_training_backend, training_capabilities
 from ...common.responses import APIResponse
 from threading import Thread
 
@@ -81,10 +82,6 @@ def start_process():
             ))
             
 
-        train_service = TrainProcessService(current_model_name=model_name)
-        if not train_service.check_training_condition():
-            train_service.reset_progress()
-
         # Save training parameters
         training_params = {
             "model_name": model_name,
@@ -96,6 +93,22 @@ def start_process():
             "is_cot": is_cot
         }
         
+        for key in ("training_backend", "batch_size", "gradient_accumulation_steps",
+                    "max_seq_length", "gradient_checkpointing", "max_steps", "training_language",
+                    "group_by_length", "validation_batches"):
+            if key in data:
+                training_params[key] = data[key]
+        try:
+            training_params = TrainingParamsManager.prepare_training_params(training_params)
+            resolve_training_backend(training_params)
+        except (ValueError, RuntimeError) as e:
+            logger.warning(f"Rejected training parameters: {e}")
+            return jsonify(APIResponse.error(message=str(e), code=400)), 400
+
+        train_service = TrainProcessService(current_model_name=model_name)
+        if not train_service.check_training_condition():
+            train_service.reset_progress()
+
         params_manager = TrainingParamsManager()
         # Update the latest training parameters
         params_manager.update_training_params(training_params)
@@ -149,7 +162,7 @@ def stream_logs():
                             
                     last_position = log_file.tell()
                     if not new_lines:
-                        yield f":heartbeat\n\n"
+                        yield ":heartbeat\n\n"
             except Exception as e:
                 # If file reading fails, record error and continue
                 yield f"data: Error reading log file: {str(e)}\n\n"
@@ -303,7 +316,7 @@ def get_training_params():
         # Get the latest training parameters
         params_manager = TrainingParamsManager()
         training_params = params_manager.get_latest_training_params()
-        
+        training_params.update(training_capabilities(training_params))
         return jsonify(APIResponse.success(data=training_params))
     except Exception as e:
         logger.error(f"Error getting training parameters: {str(e)}", exc_info=True)
@@ -354,16 +367,6 @@ def retrain():
         # Log the received parameters
         logger.info(f"Retrain parameters: model_name={model_name}, learning_rate={learning_rate}, number_of_epochs={number_of_epochs}, concurrency_threads={concurrency_threads}, data_synthesis_mode={data_synthesis_mode}, use_cuda={use_cuda}, is_cot={is_cot}")
         
-        # Create training service instance
-        train_service = TrainProcessService(current_model_name=model_name)
-        
-        # Check if there are any in_progress statuses that need to be reset
-        if train_service.progress.progress.data["status"] == "in_progress":
-            # Reset the progress and continue
-            logger.info("There is an existing training process that was interrupted.")
-            
-        train_service.reset_progress()
-
         # Save training parameters
         training_params = {
             "model_name": model_name,
@@ -375,6 +378,28 @@ def retrain():
             "is_cot": is_cot
         }
         
+        for key in ("training_backend", "batch_size", "gradient_accumulation_steps",
+                    "max_seq_length", "gradient_checkpointing", "max_steps", "training_language",
+                    "group_by_length", "validation_batches"):
+            if key in data:
+                training_params[key] = data[key]
+        try:
+            training_params = TrainingParamsManager.prepare_training_params(training_params, use_previous_params=False)
+            resolve_training_backend(training_params)
+        except (ValueError, RuntimeError) as e:
+            logger.warning(f"Rejected retrain parameters: {e}")
+            return jsonify(APIResponse.error(message=str(e), code=400)), 400
+
+        # Create training service instance
+        train_service = TrainProcessService(current_model_name=model_name)
+        
+        # Check if there are any in_progress statuses that need to be reset
+        if train_service.progress.progress.data["status"] == "in_progress":
+            # Reset the progress and continue
+            logger.info("There is an existing training process that was interrupted.")
+            
+        train_service.reset_progress()
+
         params_manager = TrainingParamsManager()
         # Update the training parameters, optionally using previous params as base
         params_manager.update_training_params(training_params, use_previous_params=False)

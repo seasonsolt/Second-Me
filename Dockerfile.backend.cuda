@@ -4,7 +4,7 @@ FROM nvidia/cuda:12.8.1-devel-ubuntu24.04
 WORKDIR /app
 
 # Add build argument to conditionally skip llama.cpp build
-ARG SKIP_LLAMA_BUILD=false
+
 
 # Install system dependencies with noninteractive mode to avoid prompts
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -27,63 +27,28 @@ RUN pip install --upgrade pip \
 # Create directories
 RUN mkdir -p /app/dependencies /app/data/sqlite /app/data/chroma_db /app/logs /app/run /app/resources
 
-# Copy dependency files - Files that rarely change
-COPY dependencies/graphrag-1.2.1.dev27.tar.gz /app/dependencies/
-COPY dependencies/llama.cpp.zip /app/dependencies/
-
-# Copy GPU checker script
 COPY docker/app/check_gpu_support.sh /app/
 COPY docker/app/check_torch_cuda.py /app/
 RUN chmod +x /app/check_gpu_support.sh
 
-# Unpack llama.cpp and build with CUDA support (conditionally, based on SKIP_LLAMA_BUILD)
-RUN if [ "$SKIP_LLAMA_BUILD" = "false" ]; then \
-        echo "=====================================================================" && \
-        echo "STARTING LLAMA.CPP BUILD WITH CUDA SUPPORT - THIS WILL TAKE SOME TIME" && \
-        echo "=====================================================================" && \
-        LLAMA_LOCAL_ZIP="dependencies/llama.cpp.zip" && \
-        echo "Using local llama.cpp archive..." && \
-        unzip -q "$LLAMA_LOCAL_ZIP" && \
-        cd llama.cpp && \
-        mkdir -p build && \
-        cd build && \
-        echo "Starting CMake configuration with CUDA support..." && \
-        cmake -DGGML_CUDA=OFF  -DLLAMA_CUBLAS=OFF \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_SHARED_LIBS=OFF \
-              -DLLAMA_NATIVE=ON \
-              .. && \
-        echo "Starting build process (this will take several minutes)..." && \
-        cmake --build . --config Release -j --verbose && \
-        echo "Build completed successfully" && \
-        chmod +x /app/llama.cpp/build/bin/llama-server /app/llama.cpp/build/bin/llama-cli && \
-        echo "====================================================================" && \
-        echo "CUDA BUILD COMPLETED SUCCESSFULLY! GPU ACCELERATION IS NOW AVAILABLE" && \
-        echo "===================================================================="; \
-    else \
-        echo "=====================================================================" && \
-        echo "SKIPPING LLAMA.CPP BUILD (SKIP_LLAMA_BUILD=$SKIP_LLAMA_BUILD)" && \
-        echo "Using existing llama.cpp build from Docker volume" && \
-        echo "=====================================================================" && \
-        LLAMA_LOCAL_ZIP="dependencies/llama.cpp.zip" && \
-        echo "Just unpacking llama.cpp archive (no build)..." && \
-        unzip -q "$LLAMA_LOCAL_ZIP" && \
-        cd llama.cpp && \
-        mkdir -p build; \
-    fi
-
-# Mark as GPU-optimized build for runtime reference
-RUN mkdir -p /app/data && \
-    echo "{ \"gpu_optimized\": true, \"optimized_on\": \"$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\" }" > /app/data/gpu_optimized.json && \
-    echo "Created GPU-optimized marker file"
+# Linux containers use CPU/CUDA, never native macOS MLX or Metal.
+COPY dependencies/graphrag-1.2.1.dev27.tar.gz /app/dependencies/
+COPY dependencies/llama.cpp.version /app/dependencies/
+COPY scripts/build_llama.sh /app/scripts/build_llama.sh
+# No GPU at image build time: target explicit architectures instead of "native".
+ARG LLAMA_CUDA_ARCHITECTURES="75;80;86;89;90"
+RUN LLAMA_PORTABLE_BUILD=1 LLAMA_CUDA_ARCHITECTURES="$LLAMA_CUDA_ARCHITECTURES" \
+    bash /app/scripts/build_llama.sh cuda
 
 # Copy project configuration - Files that occasionally change
-COPY pyproject.toml README.md /app/
+COPY pyproject.toml poetry.lock README.md /app/
 
 # Fix for potential package installation issues with Poetry
 RUN pip install --upgrade setuptools wheel
-RUN poetry install --no-interaction --no-root || poetry install --no-interaction --no-root --without dev
-RUN pip install --force-reinstall dependencies/graphrag-1.2.1.dev27.tar.gz
+RUN poetry install --no-interaction --no-root
+RUN python -c "import shutil,zipfile; p='dependencies/graphrag-1.2.1.dev27.tar.gz'; shutil.copyfile(p,'/tmp/graphrag.zip') if zipfile.is_zipfile(p) else shutil.copyfile(p,'/tmp/graphrag.tar.gz')" \
+    && pip install --no-deps --force-reinstall /tmp/graphrag.* \
+    && rm /tmp/graphrag.*
 
 # Copy source code - Files that frequently change
 COPY docker/ /app/docker/

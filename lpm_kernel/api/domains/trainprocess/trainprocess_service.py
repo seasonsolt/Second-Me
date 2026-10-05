@@ -8,7 +8,6 @@ from lpm_kernel.L1.serializers import NotesStorage
 from lpm_kernel.kernel.note_service import NoteService
 from lpm_kernel.L2.l2_generator import L2Generator
 from lpm_kernel.L2.utils import save_hf_model
-from lpm_kernel.api.common.responses import APIResponse
 from lpm_kernel.api.domains.loads.services import LoadService
 from lpm_kernel.kernel.chunk_service import ChunkService
 from lpm_kernel.kernel.l1.l1_manager import (
@@ -17,7 +16,6 @@ from lpm_kernel.kernel.l1.l1_manager import (
     get_latest_status_bio,
     get_latest_global_bio,
 )
-from lpm_kernel.api.common.script_executor import ScriptExecutor
 from lpm_kernel.configs.config import Config
 from lpm_kernel.file_data.chunker import DocumentChunker
 from lpm_kernel.kernel.l1.l1_manager import generate_l1_from_l0
@@ -26,12 +24,17 @@ from lpm_kernel.api.domains.trainprocess.progress_enum import Status
 from lpm_kernel.api.domains.trainprocess.process_step import ProcessStep
 from lpm_kernel.api.domains.trainprocess.progress_holder import TrainProgressHolder
 from lpm_kernel.api.domains.trainprocess.training_params_manager import TrainingParamsManager
-from lpm_kernel.models.l1 import L1Bio, L1Shade
 from lpm_kernel.common.repository.database_session import DatabaseSession
+from lpm_kernel.common.performance import PerformanceRun
+from lpm_kernel.L2.data_pipeline.data_prep.synthesis_config import get_synthesis_workers
 from lpm_kernel.api.domains.kernel.routes import store_l1_data
 from lpm_kernel.api.domains.trainprocess.L1_exposure_manager import output_files, query_l1_version_data, read_file_content
 import gc
 import subprocess
+import sys
+import signal
+import json
+from lpm_kernel.L2.mlx_training.backend import resolve_training_backend, normalize_training_language
 from lpm_kernel.configs.logging import get_train_process_logger, TRAIN_LOG_FILE
 logger = get_train_process_logger()
 
@@ -59,6 +62,9 @@ class TrainProcessService:
             # Initialize stop flag
             self.is_stopped = False
             self.current_step = None
+            self.process = None
+            self._process_lock = threading.Lock()
+            self._training_done = threading.Event()
             
             # Initialize L2 data dictionary
             self.l2_data = {
@@ -163,7 +169,11 @@ class TrainProcessService:
                         failed += 1
                         continue
 
-                    # Split into chunks and save
+                    # Uploaded memories may already have chunks indexed for live retrieval.
+                    if document_service.get_document_chunks(doc.id):
+                        processed += 1
+                        continue
+                    # Split only documents without chunks.
                     chunks = chunker.split(doc.raw_content)
                     for chunk in chunks:
                         chunk.document_id = doc.id
@@ -300,7 +310,8 @@ class TrainProcessService:
             self._prepare_l2_data()
 
             l2_generator = L2Generator(
-                data_path=os.path.join(os.getcwd(), "resources")
+                data_path=os.path.join(os.getcwd(), "resources"),
+                preferred_lang=self.l2_data["basic_info"]["lang"],
             )
             l2_generator.data_preprocess(self.l2_data["notes"], self.l2_data["basic_info"])
             
@@ -332,7 +343,10 @@ class TrainProcessService:
 
             # Use data from l2_data dictionary
             training_params = TrainingParamsManager.get_latest_training_params()
-            L2Generator(is_cot=training_params.get("is_cot", False)).gen_preference_data(                
+            L2Generator(
+                is_cot=training_params.get("is_cot", False),
+                preferred_lang=self.l2_data["basic_info"]["lang"],
+            ).gen_preference_data(
                     self.l2_data["notes"],
                     self.l2_data["basic_info"],
                     self.l2_data["data_output_base_dir"],
@@ -364,7 +378,8 @@ class TrainProcessService:
             training_params = TrainingParamsManager.get_latest_training_params()
             # Use data from l2_data dictionary
             l2_generator = L2Generator(
-                data_path=os.path.join(os.getcwd(), "resources"), is_cot=training_params.get("is_cot", False)
+                data_path=os.path.join(os.getcwd(), "resources"), is_cot=training_params.get("is_cot", False),
+                preferred_lang=self.l2_data["basic_info"]["lang"],
                 )  
             l2_generator.gen_selfqa_data(
                     self.l2_data["notes"],
@@ -415,7 +430,10 @@ class TrainProcessService:
             # Get training parameters
             training_params = TrainingParamsManager.get_latest_training_params()
             # Use data from l2_data dictionary
-            l2_generator = L2Generator(data_path=os.path.join(os.getcwd(), "resources"), is_cot=training_params.get("is_cot", False))
+            l2_generator = L2Generator(
+                data_path=os.path.join(os.getcwd(), "resources"), is_cot=training_params.get("is_cot", False),
+                preferred_lang=self.l2_data["basic_info"]["lang"],
+            )
             l2_generator.gen_diversity_data(
                 self.l2_data["notes"],
                 self.l2_data["basic_info"],
@@ -509,12 +527,15 @@ class TrainProcessService:
         status_bio = get_latest_status_bio()
         global_bio = get_latest_global_bio()
         self.l2_data["basic_info"] = {
-            "username": LoadService.get_current_upload_name(),
+            "username": LoadService.get_current_upload_name() or "user",
             "aboutMe": LoadService.get_current_upload_description(),
-            "statusBio": status_bio.content if status_bio else "Currently working on an AI project.",
-            "globalBio": global_bio.content_third_view if global_bio
-                else "The User is a software engineer who loves programming and learning new technologies.",
-            "lang": "English",
+            "statusBio": status_bio.content if status_bio else "",
+            "globalBio": global_bio.content_third_view
+                if global_bio and getattr(global_bio, "status", "") != "stale" else "",
+            "lang": normalize_training_language(
+                TrainingParamsManager.get_latest_training_params().get("training_language")
+                or config.get("PREFER_LANGUAGE", "English")
+            ),
         }
 
         # Mark data as prepared
@@ -527,9 +548,20 @@ class TrainProcessService:
             # Mark step as in progress
             self.progress.mark_step_status(ProcessStep.TRAIN, Status.IN_PROGRESS)
             
+            params = TrainingParamsManager.get_latest_training_params()
+            self.training_backend = getattr(self, "training_backend", None) or resolve_training_backend(params)
+            TrainingParamsManager.update_training_params({
+                "resolved_training_backend": self.training_backend,
+                "training_objective": "sft", "dpo_executed": False,
+            })
+            self._training_done.clear()
             # Get paths for the model
             paths = self._get_model_paths(self.model_name)
             
+            if self.training_backend == "mlx":
+                marker = os.path.join(paths["personal_dir"], "training_complete.json")
+                if os.path.exists(marker):
+                    os.remove(marker)
             # Check if the model directory exists and has the necessary files
             config_file = os.path.join(paths["base_path"], "config.json")
             if not os.path.exists(paths["base_path"]) or not os.path.exists(config_file):
@@ -546,12 +578,15 @@ class TrainProcessService:
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "train", "train.log")
             logger.info(f"Log file path: {log_path}")
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            # A retry reads only this run, never an old 100% progress line.
+            open(log_path, "w").close()
             
             # Ensure output directory exists
             os.makedirs(paths["personal_dir"], exist_ok=True)
             
             # Set USER_NAME environment variable
-            os.environ["USER_NAME"] = LoadService.get_current_upload_name()
+            os.environ["USER_NAME"] = LoadService.get_current_upload_name() or "user"
             logger.info(f"USER_NAME environment variable set: {os.environ['USER_NAME']}")
             
             script_path = os.path.join(os.getcwd(), "lpm_kernel/L2/train_for_user.sh")
@@ -573,6 +608,11 @@ class TrainProcessService:
             training_result = self._start_training(script_path, log_path)
             
             if not training_result:
+                self._training_done.set()
+                monitor_thread.join(timeout=2)
+                if self.is_stopped:
+                    self.progress.mark_step_status(ProcessStep.TRAIN, Status.SUSPENDED)
+                    return False
                 logger.error("Training process failed to start")
                 self.progress.mark_step_status(ProcessStep.TRAIN, Status.FAILED)
                 return False
@@ -589,9 +629,17 @@ class TrainProcessService:
                     self.progress.mark_step_status(ProcessStep.TRAIN, Status.FAILED)
                     return False
         
+            if self.is_stopped:
+                self.progress.mark_step_status(ProcessStep.TRAIN, Status.SUSPENDED)
+                return False
+            artifact = "adapters.safetensors" if self.training_backend == "mlx" else "adapter_model.safetensors"
+            if not os.path.isfile(os.path.join(paths["personal_dir"], artifact)):
+                raise RuntimeError(f"Training produced no {artifact}")
+            self.progress.mark_step_status(ProcessStep.TRAIN, Status.COMPLETED)
             return True
-        
+
         except Exception as e:
+            self._training_done.set()
             logger.error(f"Failed to start training: {str(e)}")
             self.progress.mark_step_status(ProcessStep.TRAIN, Status.FAILED)
             return False
@@ -647,8 +695,8 @@ class TrainProcessService:
             bool: True if the training process started successfully, False otherwise
         """
         try:
-            # Reset stop flag before starting
-            self.is_stopped = False
+            if self.is_stopped:
+                return False
             
             # Get the latest training parameters from the class
             params_manager = TrainingParamsManager()
@@ -678,14 +726,41 @@ class TrainProcessService:
                 "--threads", str(concurrency_threads),
                 "--mode", str(data_synthesis_mode),
                 "--cuda", str(use_cuda),
-                "--is_cot", str(is_cot)
+                "--is_cot", str(is_cot),
+                "--batch_size", str(training_params["batch_size"]),
+                "--grad_accum", str(training_params["gradient_accumulation_steps"]),
+                "--max_length", str(training_params["max_seq_length"]),
+                "--grad_checkpoint", str(bool(training_params.get("gradient_checkpointing", True))),
             ]
             
+            if getattr(self, "training_backend", None) == "mlx":
+                paths = self._get_model_paths(self.model_name)
+                cmd = [
+                    sys.executable, "-u", "-m", "lpm_kernel.L2.mlx_training.train",
+                    "--model", paths["base_path"], "--output", paths["personal_dir"],
+                    "--data", os.path.join(os.getcwd(), "resources", "L2", "data", "merged.json"),
+                    "--user-name", LoadService.get_current_upload_name() or "user",
+                    "--lr", str(learning_rate), "--epochs", str(num_train_epochs),
+                    "--batch-size", str(training_params["batch_size"]),
+                    "--grad-accumulation", str(training_params["gradient_accumulation_steps"]),
+                    "--max-length", str(training_params["max_seq_length"]),
+                    "--validation-batches", str(training_params["validation_batches"]),
+                    "--group-by-length" if training_params["group_by_length"] else "--no-group-by-length",
+                ]
+                if training_params.get("gradient_checkpointing"):
+                    cmd.append("--grad-checkpoint")
+                if training_params.get("max_steps") is not None:
+                    cmd.extend(["--max-steps", str(training_params["max_steps"])])
+                if is_cot:
+                    cmd.append("--is-cot")
+
             # Ensure log directory exists
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            
+
             # Set environment variables to improve tqdm output
             env = os.environ.copy()
+            env["PYTHON_EXECUTABLE"] = sys.executable
+            env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
             env["PYTHONUNBUFFERED"] = "1"  # Force Python to be unbuffered
             env["FORCE_COLOR"] = "1"       # Force colored output
             env["TQDM_FORCE_TTY"] = "1"    # Force tqdm to use TTY features
@@ -694,28 +769,10 @@ class TrainProcessService:
             log_dir = os.path.dirname(log_path)
             os.makedirs(log_dir, exist_ok=True)
             
-            # Open log file
-            log_file = open(log_path, "ab")
-            
-            # Use subprocess.Popen to directly execute the training script, redirecting output to file
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                bufsize=0,  # Unbuffered
-            )
-            self.process = process
-            self.current_pid = process.pid
-            logger.info(f"Training process started with PID: {self.current_pid}")
-            
-            # Wait for process to finish directly (blocking)
-            logger.info("Waiting for training process to complete...")
-            return_code = process.wait()
-            
-            # Close log file
-            log_file.close()
-            
+            result = self._run_command(cmd, log_path, env=env)
+            return_code = result["returncode"]
+            self._training_done.set()
+
             # Save results for train method to check
             self.training_result = {
                 "returncode": return_code,
@@ -735,73 +792,50 @@ class TrainProcessService:
             return False
 
     def _monitor_training_progress(self, log_file) -> bool:
-        """Monitor training progress"""
-        try:
-            # Initialize last_position to the end of file to only process new content
+        """Read progress; process exit and saved artifacts decide completion."""
+        last_position = 0
+        training_started = False
+        while True:
             try:
-                with open(log_file, 'r') as f:
-                    f.seek(0, 2)  # Move to the end of file
-                    last_position = f.tell()
+                with open(log_file, "r", encoding="utf-8", errors="replace") as stream:
+                    stream.seek(last_position)
+                    lines = stream.readlines()
+                    last_position = stream.tell()
+                for line in lines:
+                    if "***** Running training *****" in line:
+                        training_started = True
+                    if training_started:
+                        match = re.search(r"(\d+)%\|[^|]+\| (\d+)/(\d+)", line)
+                        if match:
+                            percentage, current, total = map(int, match.groups())
+                            self._update_progress(
+                                "training_to_create_second_me", "train", min(99, percentage),
+                                f"Current step: {current}/{total}",
+                            )
+                if self._training_done.is_set() or self.is_stopped:
+                    return True
             except FileNotFoundError:
-                # If file doesn't exist yet, start from beginning when it's created
-                last_position = 0
-            
-            # variable to track training status
-            total_steps = None
-            current_step = 0
-            last_update_time = time.time()
-            training_started = False
-            
-            while True:
-                try:
-                    # read new log content
-                    with open(log_file, 'r') as f:
-                        f.seek(last_position)
-                        new_lines = f.readlines()
-                        last_position = f.tell()
-                        
-                    for line in new_lines:
-                        line = line.strip()
-                        # Check if training has started
-                        if not training_started:
-                            if "***** Running training *****" in line:
-                                training_started = True
-                                logger.info("Training started")
-                            continue  # Skip progress matching until training starts
-                        
-                        progress_match = re.search(r"(\d+)%\|[^|]+\| (\d+)/(\d+)", line)
-                        if progress_match and len(progress_match.groups()) == 3:
-                            percentage = int(progress_match.group(1))
-                            current_step = int(progress_match.group(2))
-                            total_steps = int(progress_match.group(3))
-                            
-                            # Update progress at most once per second
-                            current_time = time.time()
-                            if current_time - last_update_time >= 1.0:
-                                # logger.info(f"Training progress: {percentage}% ({current_step}/{total_steps})")
-                                if percentage == 100.0:
-                                    self.progress.mark_step_status(ProcessStep.TRAIN, Status.COMPLETED)
-                                    return True
-                                self._update_progress("training_to_create_second_me", "train", percentage, f"Current step: {current_step}/{total_steps}")
-                                last_update_time = current_time
-                    
-                        # Check if we have exited the training record interval
-                        if "=== Training Ended ===" in line:
-                            # in_training_section = False  # Exit training record interval
-                            logger.info("Exited training record interval")
-                        
-                    # Briefly pause to avoid excessive CPU usage
-                    time.sleep(0.1)  
-                    
-                except IOError as e:
-                    logger.error(f"Failed to read log file: {str(e)}")
-                    time.sleep(0.1)
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Failed to monitor training progress: {str(e)}")
-            self.progress.mark_step_status(ProcessStep.TRAIN, Status.FAILED)
-            return False
+                if self._training_done.is_set() or self.is_stopped:
+                    return False
+            time.sleep(0.1)
+
+    def _run_command(self, command, log_path, env=None):
+        """Track only this workflow's subprocess, including fuse and conversion."""
+        if self.is_stopped:
+            return {"returncode": -1, "error": "Training was cancelled"}
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "w", encoding="utf-8") as output:
+            with self._process_lock:
+                if self.is_stopped:
+                    return {"returncode": -1, "error": "Training was cancelled"}
+                process = subprocess.Popen(
+                    command, stdout=output, stderr=subprocess.STDOUT,
+                    env=env or os.environ.copy(), start_new_session=True,
+                )
+                self.process = process
+            self.current_pid = process.pid
+            return_code = process.wait()
+        return {"returncode": return_code, "error": f"See {log_path}" if return_code else None}
 
     def _update_progress(self, stage: str, step: str, percentage: float, message: str):
         """Update progress for any stage and step"""
@@ -932,26 +966,38 @@ class TrainProcessService:
             
             # Check if training output exists
             if not os.path.exists(paths["personal_dir"]):
-                return jsonify(APIResponse.error(
-                    message=f"Model '{model_name}' training output does not exist, please train model first",
-                    code=400
-                ))
+                raise RuntimeError("Training output does not exist; train the model first")
 
             # Ensure merged output directory exists
             os.makedirs(paths["merged_dir"], exist_ok=True)
                 
-            script_path = os.path.join(
-                os.getcwd(), "lpm_kernel/L2/merge_weights_for_user.sh"
-                )
             log_path = os.path.join(os.getcwd(), "logs", f"merge_weights_{self.model_name}.log")
             
             # Ensure log directory exists
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             # Use script executor to execute merge script
-            script_executor = ScriptExecutor()
-            result = script_executor.execute(
-                script_path=script_path, script_type="merge_weights", log_file=log_path
-            )
+            params = TrainingParamsManager.get_latest_training_params()
+            backend = params.get("resolved_training_backend") or resolve_training_backend(params)
+            if backend == "mlx":
+                marker = os.path.join(paths["personal_dir"], "training_complete.json")
+                if not os.path.isfile(marker):
+                    raise RuntimeError("MLX training has not completed; refusing to fuse stale adapters")
+                with open(marker, encoding="utf-8") as stream:
+                    completion = json.load(stream)
+                if completion.get("model") != os.path.realpath(paths["base_path"]):
+                    raise RuntimeError("MLX adapter was trained against a different base model")
+                command = [sys.executable, "-u", "-m", "mlx_lm", "fuse",
+                           "--model", paths["base_path"], "--adapter-path", paths["personal_dir"],
+                           "--save-path", paths["merged_dir"]]
+            else:
+                command = [
+                    sys.executable, "-u", "-m", "lpm_kernel.L2.merge_lora_weights",
+                    "--base_model_path", paths["base_path"],
+                    "--lora_adapter_path", paths["personal_dir"],
+                    "--output_model_path", paths["merged_dir"],
+                    "--use-cuda" if params.get("use_cuda", False) else "--no-use-cuda",
+                ]
+            result = self._run_command(command, log_path)
             
             logger.info(f"Weight merge task result: {result}")
             
@@ -970,6 +1016,9 @@ class TrainProcessService:
                 self.progress.mark_step_status(ProcessStep.MERGE_WEIGHTS, Status.FAILED)
                 return False
             
+            if self.is_stopped:
+                self.progress.mark_step_status(ProcessStep.MERGE_WEIGHTS, Status.SUSPENDED)
+                return False
             logger.info("Weight merge completed successfully")
             self.progress.mark_step_status(ProcessStep.MERGE_WEIGHTS, Status.COMPLETED)
             return True
@@ -1019,11 +1068,11 @@ class TrainProcessService:
             os.makedirs(os.path.dirname(gguf_path), exist_ok=True)
             
             # Use script executor to execute conversion script
-            script_executor = ScriptExecutor()
-            result = script_executor.execute(
-                script_path=script_path,
-                script_type="convert_model",
-                args=args
+            if not os.path.isfile(script_path):
+                raise RuntimeError("Pinned llama.cpp converter is missing; run setup first")
+            result = self._run_command(
+                [sys.executable, "-u", script_path, *args],
+                os.path.join(os.getcwd(), "logs", f"convert_model_{self.model_name}.log"),
             )
             
             logger.info(f"Model conversion result: {result}")
@@ -1042,6 +1091,9 @@ class TrainProcessService:
                 self.progress.mark_step_status(ProcessStep.CONVERT_MODEL, Status.FAILED)
                 return False
             
+            if self.is_stopped:
+                self.progress.mark_step_status(ProcessStep.CONVERT_MODEL, Status.SUSPENDED)
+                return False
             logger.info("Model conversion completed successfully")
             self.progress.mark_step_status(ProcessStep.CONVERT_MODEL, Status.COMPLETED)
             return True
@@ -1073,59 +1125,65 @@ class TrainProcessService:
             return False
 
     def start_process(self) -> bool:
-        """Start training process"""
-        try:
-            self.is_stopped = False
-            # Store the current process PID
-            self.current_pid = os.getpid()  # Store the PID
-            logger.info(f"Training process started with PID: {self.current_pid}")
-            # Get the ordered list of all steps
-            ordered_steps = ProcessStep.get_ordered_steps()
+        """Execute/resume the workflow and persist timings even on failure."""
+        params = TrainingParamsManager.get_latest_training_params()
+        metrics = PerformanceRun(metadata={
+            key: params.get(key) for key in (
+                "model_name", "training_backend", "concurrency_threads", "data_synthesis_mode",
+                "batch_size", "gradient_accumulation_steps", "max_seq_length", "gradient_checkpointing",
+                "group_by_length", "validation_batches",
+            )
+        })
+        metrics.status = "failed"
+        with metrics:
+            try:
+                self.is_stopped = False
+                self.training_backend = resolve_training_backend(params)
+                os.environ["CONCURRENCY_THREADS"] = str(get_synthesis_workers({
+                    "CONCURRENCY_THREADS": str(params.get("concurrency_threads", 2))
+                }))
+                os.environ["DATA_SYNTHESIS_MODE"] = params.get("data_synthesis_mode") or "low"
+                TrainingParamsManager.update_training_params({"resolved_training_backend": self.training_backend})
+                self.current_pid = None  # Track only this workflow's subprocesses.
+                self.performance_report_directory = str(metrics.directory)
+                ordered_steps = ProcessStep.get_ordered_steps()
+                last_successful_step = self.progress.get_last_successful_step()
+                start_index = ordered_steps.index(last_successful_step) + 1 if last_successful_step else 0
 
-            # Get the last successfully completed step
-            last_successful_step = self.progress.get_last_successful_step()
-            start_index = 0
-            if last_successful_step:
-                start_index = ordered_steps.index(last_successful_step) + 1
-
-            # Start executing from the step after the last successful one
-            for step in ordered_steps[start_index:]:
-                self.current_step = step
-                if self.is_stopped:
-                    logger.info("Training process aborted during step")
-                    self.progress.mark_step_status(step, Status.SUSPENDED)
-                    break  # If stop is requested, exit the loop
-            
-                logger.info(f"Starting step: {step.value}")
-
-                # Execute the corresponding method
-                method_name = step.get_method_name()
-                if not hasattr(self, method_name):
-                    logger.error(f"Method {method_name} not found")
-                    self.progress.mark_step_status(step, Status.FAILED)
-                    return False
-
-                method = getattr(self, method_name)
-                success = method()
-
-                if not success:
-                    logger.error(f"Step {step.value} failed")
-                    logger.info(f'Marking step as failed: stage={step.value}, step={step.value}')
-                    self.progress.mark_step_status(step, Status.FAILED)
-                    return False
-                logger.info(f"Step {step.value} completed successfully")
-                # self.progress.mark_step_status(step, Status.COMPLETED)
-            if self.is_stopped:
-                logger.info("Training process was stopped during a step")
-            else:
-               logger.info("Training process completed...")
-
-            return True
-        except Exception as e:
-            logger.error(f"Exception occurred: {str(e)}", exc_info=True)
-            if self.current_step:
-                self.progress.mark_step_status(self.current_step, Status.FAILED)
-            return False
+                for step in ordered_steps[start_index:]:
+                    self.current_step = step
+                    if self.is_stopped:
+                        metrics.status = "suspended"
+                        self.progress.mark_step_status(step, Status.SUSPENDED)
+                        return False
+                    logger.info("Starting step: %s", step.value)
+                    with metrics.step(step.value) as timing:
+                        method = getattr(self, step.get_method_name(), None)
+                        if method is None:
+                            logger.error("Method %s not found", step.get_method_name())
+                            self.progress.mark_step_status(step, Status.FAILED)
+                            return False
+                        success = method()
+                        timing["status"] = (
+                            "suspended" if self.is_stopped else "completed" if success else "failed"
+                        )
+                        if not success or self.is_stopped:
+                            metrics.status = timing["status"]
+                            self.progress.mark_step_status(
+                                step, Status.SUSPENDED if self.is_stopped else Status.FAILED
+                            )
+                            return False
+                    logger.info("Step %s completed successfully", step.value)
+                metrics.status = "suspended" if self.is_stopped else "completed"
+                return not self.is_stopped
+            except Exception as exc:
+                metrics.status = "suspended" if self.is_stopped else "failed"
+                logger.error("Training workflow failed: %s", exc, exc_info=True)
+                if getattr(self, "current_step", None):
+                    self.progress.mark_step_status(
+                        self.current_step, Status.SUSPENDED if self.is_stopped else Status.FAILED
+                    )
+                return False
 
     def reset_progress(self):
         """Save current progress
@@ -1168,70 +1226,25 @@ class TrainProcessService:
             return None
 
     def stop_process(self):
-        """Stop training process
-        
-        Returns:
-            bool: True if the process was stopped successfully, False otherwise
-        """
+        """Cancel this workflow's subprocess group, never the backend's other children."""
+        self.is_stopped = True
+        self._training_done.set()
+        if self.current_step:
+            self.progress.mark_step_status(self.current_step, Status.SUSPENDED)
+        with self._process_lock:
+            process = getattr(self, "process", None)
+        if process is None or process.poll() is not None:
+            return True
         try:
-            # Set the stop flag
-            self.is_stopped = True
-            logger.info("Training process has been requested to stop")
-            # mark train stop
-            if self.current_step == ProcessStep.TRAIN:
-                self.progress.mark_step_status(ProcessStep.TRAIN, Status.SUSPENDED)
-            
-            # First check if we have the current process PID
-            if not hasattr(self, 'current_pid') or not self.current_pid:
-                logger.info("No active process PID found")
-                if self.progress.progress.data["current_stage"]:
-                    current_stage_name = self.progress.progress.data["current_stage"]
-                    current_stage = next((s for s in self.progress.progress.data["stages"] if s["name"] == current_stage_name), None)
-                    if current_stage and current_stage["current_step"]:
-                        step = ProcessStep(current_stage["current_step"].lower().replace(" ", "_"))
-                        self.progress.mark_step_status(step, Status.SUSPENDED)
-                return True
-
+            os.killpg(process.pid, signal.SIGTERM)
             try:
-                logger.info(f"Attempting to terminate process with PID: {self.current_pid}")
-                
-                # Check if the process exists
-                if psutil.pid_exists(self.current_pid):
-                    # Get the process object
-                    process = psutil.Process(self.current_pid)
-                    
-                    # Get all child processes
-                    children = process.children(recursive=True)
-                    
-                    # Terminate all child processes first
-                    for child in children:
-                        logger.info(f"Terminating child process with PID: {child.pid}")
-                        try:
-                            child.terminate()
-                        except psutil.NoSuchProcess:
-                            pass
-                    
-                    # Wait for children to terminate
-                    gone, still_alive = psutil.wait_procs(children, timeout=3)
-                    
-                    # Kill any remaining children
-                    for child in still_alive:
-                        logger.info(f"Killing child process with PID: {child.pid}")
-                        try:
-                            child.kill()
-                        except psutil.NoSuchProcess:
-                            pass
-                    
-                    # Note: We don't terminate the main process as it's this process
-                    logger.info(f"All child processes of {self.current_pid} have been terminated") 
-                    gc.collect()
-                    return True
-                else:
-                    logger.warning(f"Process with PID {self.current_pid} no longer exists")
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-                logger.error(f"Failed to terminate process: {str(e)}", exc_info=True)
-                
-        except Exception as e:
-            logger.error(f"Error stopping training process: {str(e)}", exc_info=True)
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=3)
+            return True
+        except ProcessLookupError:
+            return True
+        except OSError:
+            logger.exception("Failed to stop training subprocess group")
             return False

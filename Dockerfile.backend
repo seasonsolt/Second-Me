@@ -15,39 +15,22 @@ RUN apt-get update && apt-get install -y \
 # Create directories
 RUN mkdir -p /app/dependencies /app/data/sqlite /app/data/chroma_db /app/logs /app/run /app/resources
 
-# Copy dependency files - Files that rarely change
 COPY dependencies/graphrag-1.2.1.dev27.tar.gz /app/dependencies/
-COPY dependencies/llama.cpp.zip /app/dependencies/
-
-# Copy GPU checker script (only used for status reporting, not rebuilding)
+COPY dependencies/llama.cpp.version /app/dependencies/
+COPY scripts/build_llama.sh /app/scripts/build_llama.sh
 COPY docker/app/check_gpu_support.sh /app/
 COPY docker/app/check_torch_cuda.py /app/
 RUN chmod +x /app/check_gpu_support.sh
-
-# Build llama.cpp
-RUN LLAMA_LOCAL_ZIP="dependencies/llama.cpp.zip" \
-    && echo "Using local llama.cpp archive..." \
-    && unzip -q "$LLAMA_LOCAL_ZIP" \
-    && cd llama.cpp \
-    && mkdir -p build && cd build \
-    && cmake .. \
-    && cmake --build . --config Release \
-    && if [ ! -f "bin/llama-server" ]; then \
-         echo "Build failed: llama-server executable not found" && exit 1; \
-       else \
-         echo "Successfully built llama-server"; \
-       fi
-
-# Mark as CPU-only build for runtime reference
-RUN mkdir -p /app/data && \
-    echo "{ \"gpu_optimized\": false, \"optimized_on\": \"$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\" }" > /app/data/gpu_optimized.json && \
-    echo "Created CPU-only marker file"
+# Portable CPU build: -march=native would crash on hosts other than the builder.
+RUN LLAMA_PORTABLE_BUILD=1 bash /app/scripts/build_llama.sh cpu
 
 # Copy project configuration - Files that occasionally change
-COPY pyproject.toml README.md /app/
+COPY pyproject.toml poetry.lock README.md /app/
 
 RUN poetry install --no-interaction --no-root
-RUN pip install --force-reinstall dependencies/graphrag-1.2.1.dev27.tar.gz
+RUN python -c "import shutil,zipfile; p='dependencies/graphrag-1.2.1.dev27.tar.gz'; shutil.copyfile(p,'/tmp/graphrag.zip') if zipfile.is_zipfile(p) else shutil.copyfile(p,'/tmp/graphrag.tar.gz')" \
+    && pip install --no-deps --force-reinstall /tmp/graphrag.* \
+    && rm /tmp/graphrag.*
 
 
 # Copy source code - Files that frequently change

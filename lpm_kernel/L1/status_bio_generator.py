@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional, Union, Any
 import logging
 
-from openai import OpenAI
+from lpm_kernel.common.performance import create_synthesis_client
 
 from lpm_kernel.L1.bio import Bio, Chat, Note, Todo, UserInfo
 from lpm_kernel.L1.prompt import PREFER_LANGUAGE_SYSTEM_PROMPT, STATUS_BIO_SYSTEM_PROMPT
@@ -30,10 +30,11 @@ class StatusBioGenerator:
             self.client = None
             self.model_name = None
         else:
-            self.client = OpenAI(
+            self.client = create_synthesis_client(
+                "l1_status",
                 api_key=self.user_llm_config.chat_api_key,
                 base_url=self.user_llm_config.chat_endpoint,
-                timeout=45.0,  # Set global timeout
+                timeout=180.0,  # Set global timeout
             )
             self.model_name = self.user_llm_config.chat_model_name
         self._top_p_adjusted = False  # Flag to track if top_p has been adjusted

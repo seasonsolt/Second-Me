@@ -3,7 +3,7 @@ import json
 import re
 import traceback
 
-from openai import OpenAI
+from lpm_kernel.common.performance import create_synthesis_client
 import numpy as np
 
 from lpm_kernel.L1.bio import (
@@ -40,7 +40,7 @@ class ShadeGenerator:
             "frequency_penalty": 0,
             "seed": 42,
             "presence_penalty": 0,
-            "timeout": 45,
+            "timeout": 180,
         }
         self.user_llm_config_service = UserLLMConfigService()
         self.user_llm_config = self.user_llm_config_service.get_available_llm()
@@ -48,7 +48,8 @@ class ShadeGenerator:
             self.client = None
             self.model_name = None
         else:
-            self.client = OpenAI(
+            self.client = create_synthesis_client(
+                "l1_shades",
                 api_key=self.user_llm_config.chat_api_key,
                 base_url=self.user_llm_config.chat_endpoint,
             )
@@ -441,7 +442,8 @@ class ShadeMerger:
             self.client = None
             self.model_name = None
         else:
-            self.client = OpenAI(
+            self.client = create_synthesis_client(
+                "l1_shades",
                 api_key=self.user_llm_config.chat_api_key,
                 base_url=self.user_llm_config.chat_endpoint,
             )
@@ -454,7 +456,7 @@ class ShadeMerger:
             "frequency_penalty": 0,
             "seed": 42,
             "presence_penalty": 0,
-            "timeout": 45,
+            "timeout": 180,
         }
         self.preferred_language = "en"
         self._top_p_adjusted = False  # Flag to track if top_p has been adjusted

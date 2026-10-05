@@ -1,7 +1,6 @@
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, List
 import os
 import chromadb
-import logging
 from lpm_kernel.configs.logging import get_train_process_logger
 
 logger = get_train_process_logger()
@@ -38,6 +37,9 @@ def detect_embedding_model_dimension(model_name: str) -> Optional[int]:
         "text-embedding-3-small": 1536,
         "text-embedding-3-large": 3072,
         
+        "bge-m3": 1024,
+        "@cf/baai/bge-m3": 1024,
+
         # Ollama models
         "snowflake-arctic-embed": 768,
         "snowflake-arctic-embed:110m": 768,
@@ -61,95 +63,40 @@ def detect_embedding_model_dimension(model_name: str) -> Optional[int]:
     return 1536
 
 
-def reinitialize_chroma_collections(dimension: int = 1536) -> bool:
+def embedding_space_key(model_name: str, provider_type: str = "", endpoint: str = "") -> str:
+    """Identify a vector space without persisting credentials or endpoint URLs."""
+    import hashlib
+    import json
+    from urllib.parse import urlsplit
+    parsed = urlsplit(endpoint or "")
+    # Query strings/userinfo can contain credentials and are not part of identity.
+    endpoint_identity = (parsed.scheme.lower(), (parsed.hostname or "").lower(),
+                         parsed.port, parsed.path.rstrip("/"))
+    identity = json.dumps([model_name, provider_type or "", endpoint_identity], separators=(",", ":"))
+    return hashlib.sha256(identity.encode()).hexdigest()[:12]
+
+
+def reinitialize_chroma_collections(dimension: int = 1536, model_name: Optional[str] = None,
+                                   provider_type: str = "", endpoint: str = "") -> bool:
+    """Prepare isolated model collections, preserving every existing index.
+
+    Old calls without an embedding model are refused: dimension alone cannot
+    identify a vector space and must never trigger legacy collection deletion.
     """
-    Reinitialize ChromaDB collections with a new dimension
-    
-    Args:
-        dimension: The new dimension for the collections
-        
-    Returns:
-        True if successful, False otherwise
-    """
+    if not model_name or dimension < 1:
+        logger.error("An embedding model and positive dimension are required for reindexing")
+        return False
     try:
-        chroma_path = os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma_db")
-        client = chromadb.PersistentClient(path=chroma_path)
-        
-        # Delete and recreate document collection
-        try:
-            # Check if collection exists before attempting to delete
-            try:
-                client.get_collection(name="documents")
-                client.delete_collection(name="documents")
-                logger.info("Deleted 'documents' collection")
-            except ValueError:
-                logger.info("'documents' collection does not exist, will create new")
-        except Exception as e:
-            logger.error(f"Error deleting 'documents' collection: {str(e)}", exc_info=True)
-            return False
-        
-        # Create document collection with new dimension
-        try:
-            client.create_collection(
-                name="documents",
-                metadata={
-                    "hnsw:space": "cosine",
-                    "dimension": dimension
-                }
-            )
-            logger.info(f"Created 'documents' collection with dimension {dimension}")
-        except Exception as e:
-            logger.error(f"Error creating 'documents' collection: {str(e)}", exc_info=True)
-            return False
-        
-        # Delete and recreate chunk collection
-        try:
-            # Check if collection exists before attempting to delete
-            try:
-                client.get_collection(name="document_chunks")
-                client.delete_collection(name="document_chunks")
-                logger.info("Deleted 'document_chunks' collection")
-            except ValueError:
-                logger.info("'document_chunks' collection does not exist, will create new")
-        except Exception as e:
-            logger.error(f"Error deleting 'document_chunks' collection: {str(e)}", exc_info=True)
-            return False
-        
-        # Create chunk collection with new dimension
-        try:
-            client.create_collection(
-                name="document_chunks",
-                metadata={
-                    "hnsw:space": "cosine",
-                    "dimension": dimension
-                }
-            )
-            logger.info(f"Created 'document_chunks' collection with dimension {dimension}")
-        except Exception as e:
-            logger.error(f"Error creating 'document_chunks' collection: {str(e)}", exc_info=True)
-            return False
-        
-        # Verify collections were created with correct dimension
-        try:
-            doc_collection = client.get_collection(name="documents")
-            chunk_collection = client.get_collection(name="document_chunks")
-            
-            doc_dimension = doc_collection.metadata.get("dimension")
-            if doc_dimension != dimension:
-                logger.error(f"Verification failed: 'documents' collection has incorrect dimension: {doc_dimension} vs {dimension}")
-                return False
-                
-            chunk_dimension = chunk_collection.metadata.get("dimension")
-            if chunk_dimension != dimension:
-                logger.error(f"Verification failed: 'document_chunks' collection has incorrect dimension: {chunk_dimension} vs {dimension}")
-                return False
-                
-            logger.info(f"Verification successful: Both collections have correct dimension: {dimension}")
-        except Exception as e:
-            logger.error(f"Error verifying collections: {str(e)}", exc_info=True)
-            return False
-        
+        client = chromadb.PersistentClient(path=os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma_db"))
+        model_key = embedding_space_key(model_name, provider_type, endpoint)
+        metadata = {"hnsw:space": "cosine", "dimension": dimension,
+                    "embedding_model": model_name, "embedding_space": model_key}
+        for prefix in ("documents", "document_chunks"):
+            collection = client.get_or_create_collection(
+                name=f"{prefix}_{model_key}_{dimension}", metadata=metadata)
+            if collection.metadata != metadata:
+                raise ValueError("Model collection metadata is incompatible")
         return True
-    except Exception as e:
-        logger.error(f"Error reinitializing ChromaDB collections: {str(e)}", exc_info=True)
+    except Exception:
+        logger.exception("Failed to prepare isolated embedding collections")
         return False

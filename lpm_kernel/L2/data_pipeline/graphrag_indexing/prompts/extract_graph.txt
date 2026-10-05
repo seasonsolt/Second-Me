@@ -17,7 +17,7 @@ For each pair of related entities, extract the following information:
 - relationship_strength: a numeric score indicating strength of the relationship between the source entity and target entity
  Format each relationship as ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_strength>)
  
-3. **Return outputs in English (Except some proper entities such as "Apple", "AI Agent", and "MindOS") as a single list of all the entities and relationships identified in steps 1 and 2. Note that the entity type outputed must be one of the given list and remain their orginal language without modification.** Use **{record_delimiter}** as the list delimiter.
+3. **Return outputs in <lang> (Except some proper entities such as "Apple", "AI Agent", and "MindOS") as a single list of all the entities and relationships identified in steps 1 and 2. Note that the entity type outputed must be one of the given list and remain their orginal language without modification.** Use **{record_delimiter}** as the list delimiter.
  
 4. When finished, output {completion_delimiter}
  

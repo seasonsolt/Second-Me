@@ -15,12 +15,14 @@ services:
       - ./resources:/app/resources
       - ./docker:/app/docker
       - ./.env:/app/.env
-      - llama-cpp-build:/app/llama.cpp/build  # Persist the llama.cpp build
+      # Named after dependencies/llama.cpp.version so a fresh volume replaces pre-marker builds.
+      - llama-cpp-build-a7a98e0:/app/llama.cpp/build  # Persist the llama.cpp build
     environment:
       # Environment variables
       - LOCAL_APP_PORT=8002
       - IN_DOCKER_ENV=1
       - PLATFORM=${PLATFORM:-linux}
+      - LLAMA_SERVER_HOST=0.0.0.0  # Reachable through the 8080 port mapping
     extra_hosts:
       - "host.docker.internal:host-gateway"
     deploy:
@@ -65,5 +67,5 @@ networks:
     driver: bridge
 
 volumes:
-  llama-cpp-build:
+  llama-cpp-build-a7a98e0:
     driver: local

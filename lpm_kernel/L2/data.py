@@ -9,8 +9,8 @@ import graphrag
 import json
 import os
 import pandas as pd
-import random
-import subprocess
+import sys
+import time
 import traceback
 import yaml
 from collections import defaultdict
@@ -30,6 +30,10 @@ from lpm_kernel.L2.data_pipeline.data_prep.diversity.diversity_data_generator im
 from lpm_kernel.L2.data_pipeline.data_prep.preference.preference_QA_generate import PreferenceQAGenerator
 from lpm_kernel.L2.data_pipeline.data_prep.selfqa.selfqa_generator import SelfQA
 from lpm_kernel.L2.note_templates import OBJECTIVE_TEMPLATES, SUBJECTIVE_TEMPLATES
+from lpm_kernel.L2.data_pipeline.graphrag_indexing.runtime import (
+    prepare_runtime_settings, run_indexing_subprocess, stable_template_choice,
+)
+from lpm_kernel.L2.data_pipeline.data_prep.synthesis_config import get_synthesis_workers
 from lpm_kernel.L2.utils import format_timestr
 from lpm_kernel.api.services.user_llm_config_service import UserLLMConfigService
 
@@ -368,7 +372,7 @@ class L2DataProcessor:
             if note.memory_type not in OBJECT_NOTE_TYPE:
                 note.create_time = format_timestr(note.create_time)
 
-                basic_template = random.choice(selected_templates["basic"]).format(user_name=user_info["username"])
+                basic_template = stable_template_choice(selected_templates["basic"], content=note.content, insight=note.insight, title=note.title).format(user_name=user_info["username"])
 
                 if note.insight:
                     # for markdown and doc
@@ -417,12 +421,12 @@ class L2DataProcessor:
                     continue
                 new_item = note.copy()
                 if note.content is not None and note.content != "":
-                    new_item.processed = random.choice(
-                        templates["with_content"]
+                    new_item.processed = stable_template_choice(
+                        templates["with_content"], content=note.content, insight=note.insight, title=note.title
                     ).format(content=note.content, insight=note.insight)
                 else:
-                    new_item.processed = random.choice(
-                        templates["without_content"]
+                    new_item.processed = stable_template_choice(
+                        templates["without_content"], content=note.content, insight=note.insight, title=note.title
                     ).format(insight=note.insight)
                 new_item_list.append(new_item)
 
@@ -492,103 +496,33 @@ class L2DataProcessor:
             output_dir: Directory to save indexing results.
             lang: Language for the prompts.
         """
-        GRAPH_CONFIG = os.path.join(
-            os.getcwd(), "lpm_kernel/L2/data_pipeline/graphrag_indexing/settings.yaml"
+        project_root = os.getcwd()
+        graph_config = os.path.join(project_root, "lpm_kernel/L2/data_pipeline/graphrag_indexing/settings.yaml")
+        llm_config = UserLLMConfigService().get_available_llm()
+        if llm_config is None:
+            raise RuntimeError("Configure synthesis chat and embedding models before GraphRAG indexing")
+        with open(graph_config, encoding="utf-8") as file:
+            template = yaml.safe_load(file)
+        workers = get_synthesis_workers()
+        models = {
+            "default_chat_model": {"model": llm_config.chat_model_name, "api_base": llm_config.chat_endpoint},
+            "default_embedding_model": {"model": llm_config.embedding_model_name, "api_base": llm_config.embedding_endpoint},
+        }
+        runtime_root, config_path, cache_root = prepare_runtime_settings(
+            project_root, template, graph_input_dir, output_dir, lang, models, workers,
         )
-
-        ENV_CONFIG = os.path.join(
-            os.getcwd(), "lpm_kernel/L2/data_pipeline/graphrag_indexing/.env"
+        metrics_path = os.path.join(project_root, "run/graphrag", f"{runtime_root.name}-{time.time_ns()}.json")
+        # Credentials live only in the child environment, never tracked YAML or .env.
+        env = os.environ.copy()
+        env["PYTHON_EXECUTABLE"] = sys.executable
+        env["GRAPHRAG_CHAT_API_KEY"] = llm_config.chat_api_key or "unused-local-key"
+        env["GRAPHRAG_EMBEDDING_API_KEY"] = llm_config.embedding_api_key or "unused-local-key"
+        logger.info("GraphRAG concurrency=%s cache namespace=%s metrics=%s", workers, cache_root.name, metrics_path)
+        run_indexing_subprocess(
+            ["bash", os.path.join(project_root, "lpm_kernel/L2/data_pipeline/data_prep/scripts/graphrag_indexing.sh"),
+             str(config_path), str(runtime_root), metrics_path],
+            cwd=project_root, env=env, logger=logger,
         )
-
-        user_llm_config_service = UserLLMConfigService()
-        user_llm_config = user_llm_config_service.get_available_llm()
-
-        chat_api_key = user_llm_config.chat_api_key
-        chat_base_url = user_llm_config.chat_endpoint
-        chat_model_name = user_llm_config.chat_model_name
-
-        embedding_api_key = user_llm_config.embedding_api_key
-        embedding_base_url = user_llm_config.embedding_endpoint
-        embedding_model_name = user_llm_config.embedding_model_name
-
-        with open(GRAPH_CONFIG, "r", encoding="utf-8") as file:
-            settings = yaml.safe_load(file)
-
-        with open(ENV_CONFIG, "w", encoding="utf-8") as file:
-            file.write(f"GRAPHRAG_API_KEY={chat_api_key}")
-
-        settings["input"]["base_dir"] = graph_input_dir
-        settings["output"]["base_dir"] = output_dir
-        settings["reporting"]["base_dir"] = os.path.join(output_dir, "../report")
-
-        settings["models"]["default_chat_model"]["api_base"] = chat_base_url
-        settings["models"]["default_chat_model"]["model"] = chat_model_name
-        settings["models"]["default_chat_model"]["api_key"] = chat_api_key
-
-        if chat_model_name.startswith("openai"):
-            settings["models"]["default_chat_model"]["model"] = chat_model_name.replace("openai/", "")
-
-        if embedding_model_name.startswith("openai"):
-            settings["models"]["default_embedding_model"]["model"] = embedding_model_name.replace("openai/", "")
-        else:
-            settings["models"]["default_embedding_model"]["model"] = embedding_model_name
-
-        settings["models"]["default_embedding_model"]["api_base"] = embedding_base_url
-        settings["models"]["default_embedding_model"]["api_key"] = embedding_api_key
-
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            logger.warning(f"Specified output directory does not exist, created: {output_dir}.")
-
-        with open(GRAPH_CONFIG, "w", encoding="utf-8") as file:
-            yaml.dump(settings, file, default_flow_style=False, allow_unicode=True)
-
-        logger.info(f"Input base_dir has been updated to {graph_input_dir} and saved.")
-        logger.info(f"Output base_dir has been updated to {output_dir} and saved.")
-        logger.info(
-            f"Report base_dir has been updated to {os.path.join(output_dir, 'report')} and saved."
-        )
-
-        # Read prompts configuration and modify entity_extraction/summarize_descriptions from "in Chinese" to "in {lang}"
-        entity_extraction_path = os.path.join(
-            os.getcwd(),
-            "lpm_kernel/L2/data_pipeline/graphrag_indexing/prompts/extract_graph.txt",
-        )
-        with open(entity_extraction_path, "r", encoding="utf-8") as f1:
-            entity_extraction = f1.read()
-            entity_extraction = entity_extraction.replace("<lang>", lang)
-        with open(entity_extraction_path, "w", encoding="utf-8") as f2:
-            f2.write(entity_extraction)
-
-        summarize_descriptions_path = os.path.join(
-            os.getcwd(),
-            "lpm_kernel/L2/data_pipeline/graphrag_indexing/prompts/summarize_descriptions.txt",
-        )
-        with open(summarize_descriptions_path, "r", encoding="utf-8") as f1:
-            summarize_descriptions = f1.read()
-            summarize_descriptions = summarize_descriptions.replace("<lang>", lang)
-        with open(summarize_descriptions_path, "w", encoding="utf-8") as f2:
-            f2.write(summarize_descriptions)
-
-        # Run GraphRAG indexing
-        try:
-            result = subprocess.run(
-                [
-                    "bash",
-                    os.path.join(
-                        os.getcwd(),
-                        "lpm_kernel/L2/data_pipeline/data_prep/scripts/graphrag_indexing.sh",
-                    ),
-                ],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            if result.stderr:
-                logger.error(f"subprocess.run graphrag index error: {result.stderr}")
-                raise RuntimeError("subprocess.run graphrag index error")
-        except Exception as e:
-            raise
 
         """Post-processing"""
 

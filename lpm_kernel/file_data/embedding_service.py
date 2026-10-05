@@ -1,18 +1,17 @@
 from typing import List, Tuple
 import chromadb
-from chromadb.utils import embedding_functions
 import os
 from .dto.chunk_dto import ChunkDTO
 from lpm_kernel.common.llm import LLMClient
 from lpm_kernel.file_data.document_dto import DocumentDTO
-from typing import List, Dict, Optional
+from typing import Optional
 from lpm_kernel.configs.logging import get_train_process_logger
 logger = get_train_process_logger()
 
 
 class EmbeddingService:
     def __init__(self):
-        from lpm_kernel.file_data.chroma_utils import detect_embedding_model_dimension
+        from lpm_kernel.file_data.chroma_utils import detect_embedding_model_dimension, embedding_space_key
         from lpm_kernel.api.services.user_llm_config_service import UserLLMConfigService
         
         chroma_path = os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma_db")
@@ -37,67 +36,56 @@ class EmbeddingService:
             self.dimension = 1536
             logger.error(f"Error detecting embedding dimension, using default: {self.dimension}. Error: {str(e)}", exc_info=True)
 
-        # Check for dimension mismatches in all collections first
-        collections_to_init = ["documents", "document_chunks"]
-        dimension_mismatch_detected = False
-        
-        # First pass: check all collections for dimension mismatches
-        for collection_name in collections_to_init:
+        # Keep old collections intact when switching models (even same dimension).
+        model_name = (user_llm_config.embedding_model_name if 'user_llm_config' in locals()
+                      and user_llm_config and user_llm_config.embedding_model_name
+                      else "text-embedding-ada-002")
+        configuration = user_llm_config if 'user_llm_config' in locals() else None
+        model_key = embedding_space_key(model_name,
+                                        getattr(configuration, "embedding_provider_type", "") or "",
+                                        getattr(configuration, "embedding_endpoint", "") or "")
+        metadata = {"hnsw:space": "cosine", "dimension": self.dimension,
+                    "embedding_model": model_name, "embedding_space": model_key}
+        def collection_for(name):
             try:
-                collection = self.client.get_collection(name=collection_name)
-                if collection.metadata.get("dimension") != self.dimension:
-                    logger.warning(f"Dimension mismatch in '{collection_name}' collection: {collection.metadata.get('dimension')} vs {self.dimension}")
-                    dimension_mismatch_detected = True
-            except ValueError:
-                # Collection doesn't exist yet, will be created later
-                pass
-        
-        # Handle dimension mismatch if detected in any collection
-        if dimension_mismatch_detected:
-            self._handle_dimension_mismatch()
-        
-        # Second pass: create or get collections with the correct dimension
-        try:
-            self.document_collection = self.client.get_collection(name="documents")
-            # Verify dimension after possible reinitialization
-            doc_dimension = self.document_collection.metadata.get("dimension")
-            if doc_dimension != self.dimension:
-                logger.error(f"Collection 'documents' still has incorrect dimension after reinitialization: {doc_dimension} vs {self.dimension}")
-                # Try to reinitialize again if dimension is still incorrect
-                raise RuntimeError(f"Failed to set correct dimension for 'documents' collection: {doc_dimension} vs {self.dimension}")
-        except ValueError:
-            # Collection doesn't exist, create it with the correct dimension
-            try:
-                self.document_collection = self.client.create_collection(
-                    name="documents", metadata={"hnsw:space": "cosine", "dimension": self.dimension}
-                )
-                logger.info(f"Created 'documents' collection with dimension {self.dimension}")
-            except Exception as e:
-                logger.error(f"Failed to create 'documents' collection: {str(e)}", exc_info=True)
-                raise RuntimeError(f"Failed to create 'documents' collection: {str(e)}")
+                legacy = self.client.get_collection(name=name)
+                legacy_metadata = legacy.metadata or {}
+                same_model = legacy_metadata.get("embedding_space") == model_key
+                legacy_openai = (not legacy_metadata.get("embedding_model")
+                                 and model_name == "text-embedding-ada-002"
+                                 and (getattr(configuration, "embedding_endpoint", "") or "").rstrip("/")
+                                 in {"", "https://api.openai.com/v1"})
+                if (legacy_metadata.get("dimension") == self.dimension
+                        and legacy_metadata.get("hnsw:space") == "cosine"
+                        and (same_model or legacy_openai)):
+                    return legacy
+            except Exception as error:
+                if not isinstance(error, ValueError) and type(error).__name__ not in {"NotFoundError", "InvalidCollectionException"}:
+                    raise
+            isolated_name = f"{name}_{model_key}_{self.dimension}"
+            return self.client.get_or_create_collection(name=isolated_name, metadata=metadata)
+        self.embedding_model_name = model_name
+        self.embedding_space = model_key
+        self.document_collection = collection_for("documents")
+        self.chunk_collection = collection_for("document_chunks")
 
-        try:
-            self.chunk_collection = self.client.get_collection(name="document_chunks")
-            # Verify dimension after possible reinitialization
-            chunk_dimension = self.chunk_collection.metadata.get("dimension")
-            if chunk_dimension != self.dimension:
-                logger.error(f"Collection 'document_chunks' still has incorrect dimension after reinitialization: {chunk_dimension} vs {self.dimension}")
-                # Try to reinitialize again if dimension is still incorrect
-                raise RuntimeError(f"Failed to set correct dimension for 'document_chunks' collection: {chunk_dimension} vs {self.dimension}")
-        except ValueError:
-            # Collection doesn't exist, create it with the correct dimension
-            try:
-                self.chunk_collection = self.client.create_collection(
-                    name="document_chunks", metadata={"hnsw:space": "cosine", "dimension": self.dimension}
-                )
-                logger.info(f"Created 'document_chunks' collection with dimension {self.dimension}")
-            except Exception as e:
-                logger.error(f"Failed to create 'document_chunks' collection: {str(e)}", exc_info=True)
-                raise RuntimeError(f"Failed to create 'document_chunks' collection: {str(e)}")
+    def _ensure_current_model(self):
+        # The configuration can change while singleton services keep running.
+        config_service = getattr(self.llm_client, "user_llm_config_service", None)
+        if config_service is None:
+            return
+        configuration = config_service.get_available_llm()
+        model = (configuration.embedding_model_name if configuration else None) or "text-embedding-ada-002"
+        from lpm_kernel.file_data.chroma_utils import embedding_space_key
+        space = embedding_space_key(model, getattr(configuration, "embedding_provider_type", "") or "",
+                                    getattr(configuration, "embedding_endpoint", "") or "")
+        if space != self.embedding_space:
+            self.__init__()
 
     def generate_document_embedding(self, document: DocumentDTO) -> List[float]:
         """Process document level embedding and store in ChromaDB"""
         try:
+            self._ensure_current_model()
             if not document.raw_content:
                 logger.warning(
                     f"Document {document.id} has no content to process embedding"
@@ -118,19 +106,19 @@ class EmbeddingService:
             # store to ChromaDB
             try:
                 logger.info(f"Storing embedding for document {document.id} in ChromaDB")
-                self.document_collection.add(
+                self.document_collection.upsert(
                     documents=[document.raw_content],
                     ids=[str(document.id)],
-                    embeddings=[embedding.tolist()],
+                    embeddings=[embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)],
                     metadatas=[
                         {
-                            "title": document.title or document.name,
-                            "mime_type": document.mime_type,
+                            "title": document.title or document.name or "",
+                            "mime_type": document.mime_type or "",
                             "create_time": document.create_time.isoformat()
                             if document.create_time
-                            else None,
-                            "document_size": document.document_size,
-                            "url": document.url,
+                            else "",
+                            "document_size": document.document_size or 0,
+                            "url": document.url or "",
                         }
                     ],
                 )
@@ -140,7 +128,7 @@ class EmbeddingService:
                 result = self.document_collection.get(
                     ids=[str(document.id)], include=["embeddings"]
                 )
-                if not result or not result["embeddings"]:
+                if not result or (result.get("embeddings") is None or len(result["embeddings"]) == 0):
                     logger.error(
                         f"Failed to verify embedding storage for document {document.id}"
                     )
@@ -163,7 +151,7 @@ class EmbeddingService:
         Store in ChromaDB, the structure is as follows:
         documents=[c.content for c in unprocessed_chunks],
                     ids=[str(c.id) for c in unprocessed_chunks],
-                    embeddings=embeddings.tolist(),
+                    embeddings=embeddings.tolist() if hasattr(embeddings, "tolist") else [list(v) for v in embeddings],
                     metadatas=[
                         {
                             "document_id": str(c.document_id),
@@ -174,7 +162,13 @@ class EmbeddingService:
                     ],
         """
         try:
-            unprocessed_chunks = [c for c in chunks if not c.has_embedding]
+            self._ensure_current_model()
+            unprocessed_chunks = []
+            for chunk in chunks:
+                stored = self.chunk_collection.get(ids=[str(chunk.id)], include=["documents"])
+                if not stored.get("ids") or stored.get("documents", [None])[0] != chunk.content:
+                    chunk.has_embedding = False
+                    unprocessed_chunks.append(chunk)
             if not unprocessed_chunks:
                 logger.info("No unprocessed chunks found")
                 return chunks
@@ -182,21 +176,21 @@ class EmbeddingService:
             logger.info(f"Processing embeddings for {len(unprocessed_chunks)} chunks")
 
             contents = [c.content for c in unprocessed_chunks]
-            logger.info("Getting embeddings from LLM service... {}".format(contents))
+            logger.info("Getting embeddings for %d chunks", len(contents))
             embeddings = self.llm_client.get_embedding(contents)
 
             if embeddings is None or len(embeddings) == 0:
                 logger.error("Failed to get embeddings from LLM service")
                 return chunks
 
-            logger.info(f"Successfully got embeddings with shape: {embeddings.shape}")
+            logger.info(f"Successfully got {len(embeddings)} embeddings")
 
             try:
                 logger.info("Adding embeddings to ChromaDB...")
-                self.chunk_collection.add(
+                self.chunk_collection.upsert(
                     documents=[c.content for c in unprocessed_chunks],
                     ids=[str(c.id) for c in unprocessed_chunks],
-                    embeddings=embeddings.tolist(),
+                    embeddings=embeddings.tolist() if hasattr(embeddings, "tolist") else [list(v) for v in embeddings],
                     metadatas=[
                         {
                             "document_id": str(c.document_id),
@@ -213,7 +207,7 @@ class EmbeddingService:
                     result = self.chunk_collection.get(
                         ids=[str(chunk.id)], include=["embeddings"]
                     )
-                    if result and result["embeddings"]:
+                    if result and result.get("embeddings") is not None and len(result["embeddings"]) > 0:
                         chunk.has_embedding = True
                         logger.info(f"Verified embedding for chunk {chunk.id}")
                     else:
@@ -251,12 +245,13 @@ class EmbeddingService:
             if not isinstance(chunk_id, int) or chunk_id < 0:
                 raise ValueError("Invalid chunk_id")
 
+            self._ensure_current_model()
             # query from ChromaDB
             result = self.chunk_collection.get(
                 ids=[str(chunk_id)], include=["embeddings"]
             )
 
-            if not result or not result["embeddings"]:
+            if not result or (result.get("embeddings") is None or len(result["embeddings"]) == 0):
                 logger.warning(f"No embedding found for chunk {chunk_id}")
                 return None
 
@@ -285,12 +280,13 @@ class EmbeddingService:
             if not isinstance(document_id, int) or document_id < 0:
                 raise ValueError("Invalid document_id")
 
+            self._ensure_current_model()
             # query from ChromaDB
             result = self.document_collection.get(
                 ids=[str(document_id)], include=["embeddings"]
             )
 
-            if not result or not result["embeddings"]:
+            if not result or (result.get("embeddings") is None or len(result["embeddings"]) == 0):
                 logger.warning(f"No embedding found for document {document_id}")
                 return None
 
@@ -302,45 +298,32 @@ class EmbeddingService:
             )
             raise
 
-    def _handle_dimension_mismatch(self):
-        """
-        Handle dimension mismatch between current embedding model and ChromaDB collections
-        This method will reinitialize ChromaDB collections with the new dimension
-        """
-        from lpm_kernel.file_data.chroma_utils import reinitialize_chroma_collections
-        
-        logger.warning(f"Detected dimension mismatch in ChromaDB collections. Reinitializing with dimension {self.dimension}")
-        # Log the operation for better debugging
-        logger.info(f"Calling reinitialize_chroma_collections with dimension {self.dimension}")
-        
-        try:
-            success = reinitialize_chroma_collections(self.dimension)
-            
-            if success:
-                logger.info(f"Successfully reinitialized ChromaDB collections with dimension {self.dimension}")
-                # Refresh collection references
-                try:
-                    self.document_collection = self.client.get_collection(name="documents")
-                    self.chunk_collection = self.client.get_collection(name="document_chunks")
-                    
-                    # Double-check dimensions after refresh
-                    doc_dimension = self.document_collection.metadata.get("dimension")
-                    chunk_dimension = self.chunk_collection.metadata.get("dimension")
-                    
-                    if doc_dimension != self.dimension or chunk_dimension != self.dimension:
-                        logger.error(f"Dimension mismatch after refresh: documents={doc_dimension}, chunks={chunk_dimension}, expected={self.dimension}")
-                        raise RuntimeError(f"Failed to handle dimension mismatch: collections have incorrect dimensions after reinitialization")
-                        
-                except Exception as e:
-                    logger.error(f"Error refreshing collection references: {str(e)}", exc_info=True)
-                    raise RuntimeError(f"Failed to refresh ChromaDB collections after reinitialization: {str(e)}")
-            else:
-                logger.error("Failed to reinitialize ChromaDB collections")
-                raise RuntimeError("Failed to handle dimension mismatch in ChromaDB collections")
-        except Exception as e:
-            logger.error(f"Error during dimension mismatch handling: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Failed to handle dimension mismatch in ChromaDB collections: {str(e)}")
-    
+    def delete_document_index(self, document_id: int) -> None:
+        """Remove only this document from every model-specific collection."""
+        for entry in self.client.list_collections():
+            name = entry if isinstance(entry, str) else entry.name
+            if name == "document_chunks" or name.startswith("document_chunks_"):
+                self.client.get_collection(name).delete(where={"document_id": str(document_id)})
+            elif name == "documents" or name.startswith("documents_"):
+                self.client.get_collection(name).delete(ids=[str(document_id)])
+
+    def get_embedding(self, text: str) -> Optional[List[float]]:
+        self._ensure_current_model()
+        embeddings = self.llm_client.get_embedding([text])
+        if embeddings is None or len(embeddings) == 0:
+            return None
+        vector = embeddings[0]
+        return vector.tolist() if hasattr(vector, "tolist") else list(vector)
+
+    @staticmethod
+    def calculate_similarity(first: List[float], second: List[float]) -> float:
+        """Cosine similarity, shared with cosine Chroma collections."""
+        import math
+        if len(first) != len(second):
+            raise ValueError("Embedding dimensions differ")
+        denominator = math.sqrt(sum(x*x for x in first) * sum(x*x for x in second))
+        return sum(x*y for x, y in zip(first, second)) / denominator if denominator else 0.0
+
     def search_similar_chunks(
         self, query: str, limit: int = 5
     ) -> List[Tuple[ChunkDTO, float]]:
@@ -364,6 +347,7 @@ class EmbeddingService:
             if limit < 1:
                 raise ValueError("Limit must be positive")
 
+            self._ensure_current_model()
             # calculate query text embedding
             query_embedding = self.llm_client.get_embedding([query])
             if query_embedding is None or len(query_embedding) == 0:
@@ -371,31 +355,34 @@ class EmbeddingService:
 
             # query ChromaDB
             results = self.chunk_collection.query(
-                query_embeddings=[query_embedding[0].tolist()],
+                query_embeddings=[query_embedding[0].tolist() if hasattr(query_embedding[0], "tolist") else list(query_embedding[0])],
                 n_results=limit,
                 include=["documents", "metadatas", "distances"],
             )
 
-            if not results or not results["ids"]:
+            if not results or not results.get("ids") or not results["ids"][0]:
                 return []
 
             # convert results to ChunkDTO objects
             similar_chunks = []
-            for i in range(len(results["ids"])):
-                chunk_id = results["ids"][0][i]  # ChromaDB returns nested lists
-                document_id = results["metadatas"][0][i]["document_id"]
-                content = results["documents"][0][i]
-                topic = results["metadatas"][0][i].get("topic", "")
-                tags = (
-                    results["metadatas"][0][i].get("tags", "").split(",")
-                    if results["metadatas"][0][i].get("tags")
-                    else []
-                )
+            ids = results["ids"][0]
+            metadatas = (results.get("metadatas") or [[]])[0]
+            documents = (results.get("documents") or [[]])[0]
+            distances = (results.get("distances") or [[]])[0]
+            if not (len(ids) == len(metadatas) == len(documents) == len(distances)):
+                raise ValueError("Misaligned Chroma query results")
+            for chunk_id, metadata, content, distance in zip(ids, metadatas, documents, distances):
+                if not metadata or "document_id" not in metadata or content is None or distance is None:
+                    continue
+                document_id = metadata["document_id"]
+                topic = metadata.get("topic", "")
+                tags = metadata.get("tags", "").split(",") if metadata.get("tags") else []
 
-                # calculate similarity score (ChromaDB returns distances, need to convert to similarity)
-                similarity_score = (
-                    1 - results["distances"][0][i]
-                )  # assume using Euclidean distance or cosine distance
+                # Cosine distances are 1-cosine; squared L2 is not comparable.
+                metric = (self.chunk_collection.metadata or {}).get("hnsw:space", "l2")
+                if metric != "cosine":
+                    raise ValueError("Legacy non-cosine index must be rebuilt before retrieval")
+                similarity_score = 1 - distance
 
                 chunk = ChunkDTO(
                     id=int(chunk_id),

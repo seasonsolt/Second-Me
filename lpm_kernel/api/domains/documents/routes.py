@@ -402,3 +402,56 @@ def repair_documents():
     except Exception as e:
         logger.error(f"Error repairing documents: {str(e)}", exc_info=True)
         return jsonify(APIResponse.error(message=f"Error repairing documents: {str(e)}"))
+
+
+@document_bp.route("/documents/<int:document_id>/content", methods=["PUT"])
+def update_document_content(document_id):
+    """Replace factual content and rebuild retrieval immediately."""
+    payload = request.get_json(silent=True) or {}
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return jsonify(APIResponse.error("Non-empty content is required", code=400)), 400
+    try:
+        result = document_service.refresh_document_index(document_id, raw_content=content)
+        return jsonify(APIResponse.success(data=result))
+    except ValueError as error:
+        return jsonify(APIResponse.error(str(error), code=404)), 404
+    except Exception:
+        logger.exception("Memory indexing failed for document %s", document_id)
+        return jsonify(APIResponse.error("Memory indexing failed; retry this operation", code=500)), 500
+
+
+@document_bp.route("/documents/<int:document_id>/index", methods=["POST"])
+def refresh_document_index(document_id):
+    """Retry pending indexing or populate a newly selected embedding model."""
+    try:
+        result = document_service.refresh_document_index(document_id)
+        return jsonify(APIResponse.success(data=result))
+    except ValueError as error:
+        return jsonify(APIResponse.error(str(error), code=404)), 404
+    except Exception:
+        logger.exception("Memory indexing failed for document %s", document_id)
+        return jsonify(APIResponse.error("Memory indexing failed; retry this operation", code=500)), 500
+
+
+@document_bp.route("/documents/reindex", methods=["POST"])
+def reindex_all_documents():
+    """Rebuild every document index, e.g. after chunk size or embedding model changes."""
+    try:
+        documents = document_service.list_documents()
+    except Exception:
+        logger.exception("Failed to list documents for reindexing")
+        return jsonify(APIResponse.error("Failed to list documents", code=500)), 500
+    failed_ids = []
+    for document in documents:
+        try:
+            document_service.refresh_document_index(document.id)
+        except Exception:
+            logger.exception("Memory indexing failed for document %s", document.id)
+            failed_ids.append(document.id)
+    data = {"total": len(documents), "succeeded": len(documents) - len(failed_ids),
+            "failed": len(failed_ids), "failed_document_ids": failed_ids}
+    if failed_ids:
+        return jsonify(APIResponse.error("Some documents failed to reindex; retry this operation",
+                                         code=500, data=data)), 500
+    return jsonify(APIResponse.success(data=data))

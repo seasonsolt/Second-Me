@@ -1,0 +1,197 @@
+[
+  {
+    "workers": 2,
+    "wall_seconds": 16.349,
+    "samples_per_second": 0.489,
+    "correct": 8,
+    "samples": [
+      {
+        "index": 0,
+        "seconds": 6.212,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 1,
+        "seconds": 4.407,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 2,
+        "seconds": 2.662,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 3,
+        "seconds": 3.645,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 4,
+        "seconds": 3.47,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 5,
+        "seconds": 3.28,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 6,
+        "seconds": 2.598,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 7,
+        "seconds": 3.212,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      }
+    ],
+    "metrics_directory": "data/performance/20261005T032037Z-4859a946"
+  },
+  {
+    "workers": 4,
+    "wall_seconds": 8.432,
+    "samples_per_second": 0.949,
+    "correct": 8,
+    "samples": [
+      {
+        "index": 0,
+        "seconds": 2.896,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 1,
+        "seconds": 4.692,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 2,
+        "seconds": 3.73,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 3,
+        "seconds": 3.288,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 4,
+        "seconds": 2.761,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 5,
+        "seconds": 2.851,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 6,
+        "seconds": 3.253,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 7,
+        "seconds": 3.738,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      }
+    ],
+    "metrics_directory": "data/performance/20261005T032054Z-fbf189b2"
+  },
+  {
+    "workers": 6,
+    "wall_seconds": 8.421,
+    "samples_per_second": 0.95,
+    "correct": 8,
+    "samples": [
+      {
+        "index": 0,
+        "seconds": 3.221,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 1,
+        "seconds": 2.574,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 2,
+        "seconds": 3.087,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 3,
+        "seconds": 3.402,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 4,
+        "seconds": 4.102,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 5,
+        "seconds": 3.953,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 6,
+        "seconds": 3.131,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      },
+      {
+        "index": 7,
+        "seconds": 5.331,
+        "correct": true,
+        "prompt_tokens": 4289,
+        "cached_tokens": 4096
+      }
+    ],
+    "metrics_directory": "data/performance/20261005T032102Z-ff07180c"
+  }
+]

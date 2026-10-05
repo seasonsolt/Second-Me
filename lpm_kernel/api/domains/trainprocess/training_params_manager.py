@@ -18,13 +18,25 @@ class TrainingParamsManager:
     
     # Default training parameters
     _default_training_params = {
-        "model_name": "Qwen2.5-0.5B-Instruct",
+        "model_name": "Qwen3-1.7B",
         "learning_rate": 1e-4,
         "number_of_epochs": 3,
         "concurrency_threads": 2,
         "data_synthesis_mode": "low",
         "use_cuda": False,  # Default to using CUDA when available
-        "is_cot": False
+        "is_cot": False,
+        "training_backend": "auto",
+        "resolved_training_backend": None,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "max_seq_length": 4096,
+        "gradient_checkpointing": True,
+        "group_by_length": True,
+        "validation_batches": 4,
+        "max_steps": None,
+        "training_language": None,
+        "training_objective": "sft",
+        "dpo_executed": False
     }
     
     # Parameters file path
@@ -45,6 +57,43 @@ class TrainingParamsManager:
         return cls._params_file_path
     
     @classmethod
+    def prepare_training_params(cls, params, use_previous_params=True):
+        """Resolve the exact saved settings before API backend preflight."""
+        current_params = cls.get_latest_training_params() if use_previous_params else cls._default_training_params.copy()
+        for key, value in params.items():
+            if key in cls._default_training_params:
+                current_params[key] = cls._default_training_params[key] if value is None else value
+            else:
+                logger.warning(f"Ignoring unknown parameter: {key}")
+        if current_params.get("is_cot"):
+            # Training uses the native non-thinking template and strips reasoning.
+            logger.warning("Ignoring is_cot=True: thinking-model training is no longer supported")
+            current_params["is_cot"] = False
+        cls.validate_training_params(current_params)
+        return current_params
+
+    # Inclusive ranges shared with the training UI.
+    _integer_param_ranges = {
+        "batch_size": (1, 16),
+        "gradient_accumulation_steps": (1, 64),
+        "max_seq_length": (128, 32768),
+        "max_steps": (1, None),
+    }
+
+    @classmethod
+    def validate_training_params(cls, params):
+        """Raise ValueError for numeric settings the training scripts cannot use."""
+        for key, (minimum, maximum) in cls._integer_param_ranges.items():
+            value = params.get(key)
+            if key == "max_steps" and value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} must be an integer, got {value!r}")
+            if value < minimum or (maximum is not None and value > maximum):
+                upper = maximum if maximum is not None else "unbounded"
+                raise ValueError(f"{key} must be between {minimum} and {upper}, got {value}")
+
+    @classmethod
     def update_training_params(cls, params, use_previous_params=True):
         """
         Update the latest training parameters and save to file
@@ -53,17 +102,8 @@ class TrainingParamsManager:
             params: Dictionary containing training parameters
             use_previous_params: Whether to use previous training parameters as base
         """
-        # First try to load existing parameters
-        current_params = cls.get_latest_training_params() if use_previous_params else cls._default_training_params.copy()
-        
-        # Update parameters
-        for key, value in params.items():
-            if key in cls._default_training_params:
-                current_params[key] = value
-                logger.debug(f"Updated training parameter {key} to {value}")
-            else:
-                logger.warning(f"Ignoring unknown parameter: {key}")
-        
+        current_params = cls.prepare_training_params(params, use_previous_params)
+
         # Save to file
         params_file = cls._get_params_file_path()
         try:

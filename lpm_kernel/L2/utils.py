@@ -24,17 +24,9 @@ import torch
 import logging
 from lpm_kernel.configs.logging import TRAIN_LOG_FILE
 
-from lpm_kernel.L2.training_prompt import (
-    CONTEXT_PROMPT,
-    CONTEXT_COT_PROMPT,
-    JUDGE_PROMPT,
-    JUDGE_COT_PROMPT,
-    MEMORY_PROMPT,
-    MEMORY_COT_PROMPT,
-)
-
 # Add import for memory manager
 from .memory_manager import get_memory_manager
+from lpm_kernel.L2.chat_data import create_chat_messages, split_assistant_messages, format_chat_completion
 import gc
 import requests
 
@@ -357,7 +349,7 @@ def create_and_prepare_model(args, data_args, training_args, model_kwargs=None):
             # Load model with Unsloth using memory manager
             unsloth_kwargs = {
                 "model_name": args.model_name_or_path,
-                "max_seq_length": data_args.max_seq_length,
+                "max_seq_length": training_args.max_length,
                 "dtype": None,
                 "load_in_4bit": args.use_4bit_quantization,
                 "load_in_8bit": args.use_8bit_quantization,
@@ -414,10 +406,10 @@ def create_and_prepare_model(args, data_args, training_args, model_kwargs=None):
                 logger.info("Attempting most conservative loading with CPU offloading...")
                 model = AutoModelForCausalLM.from_pretrained(
                     args.model_name_or_path,
-                    device_map="auto",
+                    device_map="auto" if args.use_cuda and torch.cuda.is_available() else None,
                     offload_folder="offload_folder",
                     offload_state_dict=True,
-                    torch_dtype=torch.float16 if torch.cuda.is_available() else None,
+                    torch_dtype=torch.float16 if args.use_cuda and torch.cuda.is_available() else None,
                     trust_remote_code=True,
                     low_cpu_mem_usage=True
                 )
@@ -467,7 +459,7 @@ def create_and_prepare_model(args, data_args, training_args, model_kwargs=None):
                 else args.lora_target_modules,
                 use_gradient_checkpointing=training_args.gradient_checkpointing,
                 random_state=training_args.seed,
-                max_seq_length=data_args.max_seq_length,
+                max_seq_length=training_args.max_length,
             )
             
         except Exception as e:
@@ -487,67 +479,20 @@ def create_and_prepare_model(args, data_args, training_args, model_kwargs=None):
     return model, peft_config, tokenizer
 
 
-def create_chat_data(data_args, tokenizer):
-    """Creates and preprocesses chat data for training.
-    
-    Args:
-        data_args: Arguments for dataset configuration.
-        tokenizer: Tokenizer for text processing.
-        
-    Returns:
-        Processed dataset ready for training.
-    """
-    def preprocess(sample, user_name='user', is_cot=False):
-        """Preprocesses a chat sample.
-        
-        Args:
-            sample: The input sample to process.
-            user_name: Name of the user. Defaults to 'user'.
-            is_cot: Whether to use chain-of-thought prompts. Defaults to False.
-            
-        Returns:
-            Processed chat sample.
-        """
-        if sample.get('assistant') is None and sample.get('enhanced_request') is not None:
-            user_message = f"{user_name}'s request is: " + sample['user_request']
-            messages = [
-                {"role": "system", "content": CONTEXT_COT_PROMPT.format(user_name=user_name) if is_cot else CONTEXT_PROMPT.format(user_name=user_name)},
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": sample['enhanced_request'].strip('\n')},
-            ]
-            return [{"content": tokenizer.apply_chat_template(messages, tokenize=False)}]
-        if sample.get('assistant') is None and sample.get('user_feedback') is not None:
-            user_message = f"{user_name}'s request is: " + sample['user_request'] + "\n" + "Expert's response is: " + sample['expert_response']
-            messages = [
-                {"role": "system", "content": JUDGE_COT_PROMPT.format(user_name=user_name) if is_cot else JUDGE_PROMPT.format(user_name=user_name)},
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": sample['user_feedback'].strip('\n')},
-            ]
-            return [{"content": tokenizer.apply_chat_template(messages, tokenize=False)}]
-        
-        if sample.get('assistant') is None:
-            return []
-        sample['assistant'] = sample['assistant'].strip('\n')
-        
-        messages = [
-            {"role": "system", "content": MEMORY_COT_PROMPT.format(user_name=user_name) if is_cot else MEMORY_PROMPT.format(user_name=user_name)},
-            {"role": "user", "content": sample['user']},
-            {"role": "assistant", "content": sample['assistant']},
-        ]
-        if 'None' in sample['assistant']:
-            return []
-        return [{"content": tokenizer.apply_chat_template(messages, tokenize=False)}]
-    
-    dataset = load_dataset("json", data_files=data_args.dataset_name, split="train")
-    res_dataset = []
-    
-    for case in dataset:
-        res_dataset.extend(preprocess(case, data_args.user_name, data_args.is_cot))
-    
-    res = Dataset.from_list(res_dataset)
-    print(f"**************Dataset contains {res.num_rows} elements.**************")
 
-    return res
+def create_chat_data(data_args, tokenizer):
+    """Create prompt/completion data shared semantically with the MLX backend."""
+    dataset = load_dataset("json", data_files=data_args.dataset_name, split="train")
+    records = []
+    for case in dataset:
+        messages = create_chat_messages(case, data_args.user_name, data_args.is_cot)
+        for turn in split_assistant_messages(messages):
+            records.append(format_chat_completion(turn, tokenizer))
+    if not records:
+        raise ValueError("No usable assistant completions in the training dataset")
+    result = Dataset.from_list(records)
+    print(f"**************Dataset contains {result.num_rows} elements.**************")
+    return result
 
 
 def formatting_prompts_func(example):
@@ -620,11 +565,11 @@ def save_hf_model(model_name=None, log_file_path=None) -> str:
             config = Config()
             model_name = config.get("training", {}).get("model_name")
             if not model_name:
-                logger.warning("No model name provided and none found in config. Using Qwen2.5-0.5B-Instruct as fallback.")
-                model_name = "Qwen2.5-0.5B-Instruct"
+                logger.warning("No model name provided and none found in config. Using Qwen3-1.7B as fallback.")
+                model_name = "Qwen3-1.7B"
         except Exception as e:
-            logger.warning(f"Failed to get model name from config: {str(e)}. Using Qwen2.5-0.5B-Instruct as fallback.")
-            model_name = "Qwen2.5-0.5B-Instruct"
+            logger.warning(f"Failed to get model name from config: {str(e)}. Using Qwen3-1.7B as fallback.")
+            model_name = "Qwen3-1.7B"
     
     base_dir = os.path.join(os.getcwd(), "resources/L2/base_models")
     # Normalize model name and check for path traversal attempts
@@ -689,7 +634,8 @@ def save_hf_model(model_name=None, log_file_path=None) -> str:
                     logger.info(f"Starting download of file: {filename} (Size: {total_size / 1024 / 1024:.2f} MB)")
                 
                 # Create the file to write to
-                with open(local_file_path, 'wb') as f:
+                partial_path = local_file_path + '.part'
+                with open(partial_path, 'wb') as f:
                     # Create a progress bar
                     progress_bar = tqdm(
                         total=total_size if total_size > 0 else None,
@@ -731,6 +677,9 @@ def save_hf_model(model_name=None, log_file_path=None) -> str:
                                 progress_callback(downloaded, total_size)
                                 
                         progress_bar.close()
+                        if total_size and downloaded != total_size:
+                            raise RuntimeError(f"Incomplete download: {filename}")
+                        os.replace(partial_path, local_file_path)
                         logger.info(f"Completed download of file: {filename}")
                         return True
                     else:
@@ -775,7 +724,7 @@ def save_hf_model(model_name=None, log_file_path=None) -> str:
                 raise RuntimeError("Too many files failed to download")
             
             # If critical files failed (like model weights or config), warn specifically
-            critical_patterns = ['model.safetensors', 'config.json', 'tokenizer.json']
+            critical_patterns = ['.safetensors', 'config.json', 'tokenizer.json']
             critical_failed = [f for f in failed_files if any(pattern in f for pattern in critical_patterns)]
             if critical_failed:
                 logger.error(f"Failed to download critical files: {critical_failed}")
@@ -803,6 +752,18 @@ def save_hf_model(model_name=None, log_file_path=None) -> str:
         logger.error(f"Error downloading model: {str(e)}")
         logger.error(traceback.format_exc())
         raise
+    # Check all weight shards named by the index before reporting success.
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as index_file:
+            shards = set(json.load(index_file)["weight_map"].values())
+        missing = [name for name in shards if not os.path.isfile(os.path.join(save_path, name)) or not os.path.getsize(os.path.join(save_path, name))]
+        if missing:
+            raise RuntimeError(f"Missing model weight shards: {missing}")
+    else:
+        weights = os.path.join(save_path, "model.safetensors")
+        if not os.path.isfile(weights) or not os.path.getsize(weights):
+            raise RuntimeError("Downloaded model has no complete safetensors weights")
     return save_path
 
 def format_timestr(utc_time_str):

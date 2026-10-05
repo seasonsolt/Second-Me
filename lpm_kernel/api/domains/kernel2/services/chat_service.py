@@ -7,7 +7,6 @@ import uuid
 from typing import Tuple
 from datetime import datetime
 
-from lpm_kernel.api.services.user_llm_config_service import UserLLMConfigService
 from lpm_kernel.api.domains.kernel2.dto.chat_dto import ChatRequest
 from lpm_kernel.api.services.local_llm_service import local_llm_service
 from lpm_kernel.api.domains.kernel2.services.message_builder import MultiTurnMessageBuilder
@@ -27,7 +26,7 @@ class ChatService:
     def __init__(self):
         """Initialize chat service"""
         # Base strategy chain, must contain at least one base strategy
-        self.default_strategy_chain = [BasePromptStrategy, RoleBasedStrategy]
+        self.default_strategy_chain = [BasePromptStrategy, RoleBasedStrategy, KnowledgeEnhancedStrategy]
     
     def _get_strategy_chain(
         self,
@@ -51,17 +50,14 @@ class ChatService:
         if strategy_chain is not None:
             if not strategy_chain:
                 raise ValueError("Strategy chain cannot be empty")
-            if not any(issubclass(s, BasePromptStrategy) for s in strategy_chain):
-                raise ValueError("Strategy chain must contain at least one base strategy")
+            # Space chains start from their own root strategy, e.g. [HostSummaryStrategy].
+            if not all(isinstance(s, type) and issubclass(s, SystemPromptStrategy) for s in strategy_chain):
+                raise ValueError("Strategy chain must contain only system prompt strategies")
             return strategy_chain
             
         # Use default strategy chain
         result_chain = self.default_strategy_chain.copy()
         
-        # Add knowledge enhancement strategy based on request parameters
-        if request.enable_l0_retrieval or request.enable_l1_retrieval:
-            result_chain.append(KnowledgeEnhancedStrategy)
-            
         return result_chain
     
     def _build_messages(
@@ -88,9 +84,7 @@ class ChatService:
         
         # Log debug information
         logger.info("Using strategy chain: %s", [s.__name__ for s in final_strategy_chain])
-        logger.info("Final messages for LLM:")
-        for msg in messages:
-            logger.info(f"Role: {msg['role']}, Content: {msg['content']}")
+        logger.debug("Built %d messages", len(messages))
             
         return messages
     
@@ -296,22 +290,15 @@ class ChatService:
         Returns:
             Either an iterator for streaming responses or a single response dictionary
         """
-        logger.info(f"Chat request: {request}")
+        logger.debug("Chat request with %d messages", len(request.messages))
         # Build messages
-        message_builder = MultiTurnMessageBuilder(request, strategy_chain=strategy_chain)
+        message_builder = MultiTurnMessageBuilder(request, strategy_chain=self._get_strategy_chain(request, strategy_chain))
         messages = message_builder.build_messages(context)
         
         # Log debug information
         # logger.info("Using strategy chain: %s", [s.__name__ for s in strategy_chain] if strategy_chain else "default")
-        logger.info("Final messages for LLM:")
-        for msg in messages:
-            logger.info(f"Role: {msg['role']}, Content: {msg['content']}")
-
         # Use provided client or default local_llm_service.client
         current_client = client if client is not None else local_llm_service.client
-        
-        self.user_llm_config_service = UserLLMConfigService()
-        self.user_llm_config = self.user_llm_config_service.get_available_llm()
         
         # Prepare API call parameters
         api_params = {
@@ -335,6 +322,15 @@ class ChatService:
         if model_params:
             api_params.update(model_params)
 
+        if client is None or current_client is local_llm_service.client:
+            api_params["messages"], api_params["max_tokens"] = local_llm_service.prepare_chat_request(
+                api_params["messages"], api_params["max_tokens"])
+            extra_body = dict(api_params.get("extra_body") or {})
+            template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+            template_kwargs["enable_thinking"] = False
+            extra_body["chat_template_kwargs"] = template_kwargs
+            api_params["extra_body"] = extra_body
+
         logger.info(f"Current client base URL: {current_client.base_url}")
         # logger.info(f"Using model parameters: {api_params}")
         
@@ -342,7 +338,7 @@ class ChatService:
         try:
             response = current_client.chat.completions.create(**api_params)
             if not stream:
-                logger.info(f"Response: {response.json() if hasattr(response, 'json') else response}")
+                logger.debug("Non-streaming response received")
             return response
             
         except Exception as e:

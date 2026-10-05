@@ -9,23 +9,15 @@ This module provides enhanced chat capabilities with features like:
 - Advanced mode with multi-phase processing
 """
 
-import json
 import logging
-from datetime import datetime
-from typing import Iterator, Any
-from flask import Blueprint, request, Response, jsonify
+from typing import Iterator
+from flask import Blueprint, jsonify
 from flask_pydantic import validate
 
 from lpm_kernel.api.common.responses import APIResponse
 from lpm_kernel.api.services.local_llm_service import local_llm_service
 from lpm_kernel.api.domains.kernel2.dto.chat_dto import ChatRequest
 from lpm_kernel.api.domains.kernel2.dto.advanced_chat_dto import AdvancedChatRequest
-from lpm_kernel.api.domains.kernel2.services.message_builder import MultiTurnMessageBuilder
-from lpm_kernel.api.domains.kernel2.services.prompt_builder import (
-    BasePromptStrategy,
-    RoleBasedStrategy,
-    KnowledgeEnhancedStrategy,
-)
 from lpm_kernel.api.domains.kernel2.services.chat_service import chat_service
 from lpm_kernel.api.domains.kernel2.services.advanced_chat_service import advanced_chat_service
 
@@ -40,12 +32,10 @@ def chat(body: ChatRequest):
     Chat endpoint - streaming response
     
     Request: ChatRequest JSON object containing:
-    - message: str, current user message
-    - system_prompt: str, optional system prompt, default is "You are a helpful assistant."
-    - role_id: str, optional role UUID, if provided will use the role's system_prompt
-    - history: List[ChatMessage], message history
-    - enable_l0_retrieval: bool, whether to enable L0 knowledge retrieval, default true
-    - enable_l1_retrieval: bool, whether to enable L1 knowledge retrieval, default true
+    - messages: OpenAI-compatible system/user/assistant conversation
+    - metadata.role_id: optional role UUID
+    - metadata.enable_l0_retrieval: bool, personal chat default true
+    - metadata.enable_l1_retrieval: bool, personal chat default false
     - temperature: float, temperature parameter for randomness, default 0.01
     - max_tokens: int, maximum tokens to generate, default 2000
     """

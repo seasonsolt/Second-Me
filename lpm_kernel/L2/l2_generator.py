@@ -7,7 +7,6 @@ subjective data generation, model conversion, and inference with the trained mod
 from typing import Dict, List
 import os
 
-from openai import OpenAI
 
 from lpm_kernel.L1.bio import Note
 from lpm_kernel.L2.data import L2DataProcessor
@@ -195,11 +194,37 @@ class L2Generator:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         file_data = json.load(f)
                         if isinstance(file_data, list):
-                            merged_data.extend(file_data)
+                            for sample in file_data:
+                                if isinstance(sample, dict):
+                                    sample = dict(sample)
+                                    if sample.get("memory_format_version") != 1 and sample.get("training_type") not in {"style", "values", "preference"}:
+                                        logging.warning("Skipping legacy sample from %s; regenerate to attach bounded references", os.path.basename(file_path))
+                                        continue
+                                    if sample.get("training_type") not in {"style", "values", "preference", "retrieval_no_hit"} and not (sample.get("context") or sample.get("references")):
+                                        logging.warning("Skipping factual sample without references in %s", os.path.basename(file_path))
+                                        continue
+                                    sample.setdefault("training_type", os.path.basename(file_path).replace(".json", ""))
+                                    merged_data.append(sample)
                         else:
-                            merged_data.append(file_data)
+                            logging.warning("Skipping non-list legacy training file %s", os.path.basename(file_path))
                 except Exception as e:
                     logging.error(f"Error merging file {file_path}: {str(e)}")
+
+        # Explicit no-hit examples retain the same reference format as inference.
+        chinese = self.preferred_lang.lower() in {"chinese", "中文", "zh", "cn"}
+        missing = [
+            ("我下一次预约的具体时间是什么？", "目前没有相关记录，无法确认具体时间。"),
+            ("我去年旅行住的酒店叫什么？", "我没有找到相关记录，不能确定酒店名称。"),
+        ] if chinese else [
+            ("What is the exact time of my next appointment?", "I have no relevant record, so I cannot confirm the time."),
+            ("What hotel did I stay at on last year's trip?", "I could not find a relevant record, so I do not know the hotel name."),
+        ]
+        merged_data.extend({"user": question, "assistant": answer,
+                            "context": "", "training_type": "retrieval_no_hit", "memory_format_version": 1}
+                           for question, answer in missing)
+        from collections import Counter
+        logging.info("L2 training sample types: %s", dict(Counter(
+            sample.get("training_type", "unknown") for sample in merged_data)))
 
         # Save the merged data
         merged_output_path = os.path.join(data_output_base_dir, "merged.json")
@@ -222,24 +247,5 @@ class L2Generator:
             logging.warning(f"Failed to release Ollama models: {str(e)}")
 
     def clean_graphrag_keys(self):
-        GRAPH_CONFIG = os.path.join(
-            os.getcwd(), "lpm_kernel/L2/data_pipeline/graphrag_indexing/settings.yaml"
-        )
-
-        with open(GRAPH_CONFIG, "r", encoding="utf-8") as file:
-            settings = yaml.safe_load(file)
-        
-        settings["input"]["base_dir"] = "/your_dir"
-        settings["output"]["base_dir"] = "/your_dir"
-        settings["reporting"]["base_dir"] = "/your_dir"
-        settings["models"]["default_chat_model"]["api_key"] = "sk-xxxxxx"
-        
-        ENV_CONFIG = os.path.join(
-            os.getcwd(), "lpm_kernel/L2/data_pipeline/graphrag_indexing/.env"
-        )
-        with open(ENV_CONFIG, "w", encoding="utf-8") as file:
-            file.write("GRAPHRAG_API_KEY=sk-xxxxxx")
-        
-        with open(GRAPH_CONFIG, "w", encoding="utf-8") as file:
-            yaml.dump(settings, file, default_flow_style=False, allow_unicode=True)
-        logging.info("Graphrag config updated successfully")
+        """Compatibility hook: credentials are no longer written to GraphRAG files."""
+        logging.info("GraphRAG uses child-process credentials; no settings cleanup needed")
