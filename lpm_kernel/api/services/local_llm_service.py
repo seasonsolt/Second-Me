@@ -116,7 +116,8 @@ class LocalLLMService:
 
             metal = use_gpu and build[1] == "metal" and platform.system() == "Darwin"
             cuda = use_gpu and build[1] == "cuda" and torch.cuda.is_available()
-            backend = "Metal" if metal else "CUDA" if cuda else "CPU"
+            vulkan = use_gpu and build[1] == "vulkan"
+            backend = "Metal" if metal else "CUDA" if cuda else "Vulkan" if vulkan else "CPU"
             port, origin, context_size, parallel = self._server_settings()
             # Loopback by default; Docker sets 0.0.0.0 so its port mapping reaches the server.
             host = Config.from_env().get("LLAMA_SERVER_HOST", "127.0.0.1")
@@ -126,7 +127,7 @@ class LocalLLMService:
                 "--port", str(port), "--ctx-size", str(context_size),
                 "--parallel", str(parallel), "--cont-batching", "--jinja",
                 "--chat-template-kwargs", '{"enable_thinking":false}',
-                "--n-gpu-layers", "999" if metal or cuda else "0",
+                "--n-gpu-layers", "999" if metal or cuda or vulkan else "0",
                 "--threads", str(max(1, (os.cpu_count() or 2) - 1)),
             ]
             logs = Path.cwd() / "logs"

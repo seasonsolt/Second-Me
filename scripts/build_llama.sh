@@ -5,7 +5,7 @@ PROJECT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LLAMA_REVISION=$(tr -d '\r\n' < "$PROJECT_ROOT/dependencies/llama.cpp.version")
 LLAMA_ROOT="$PROJECT_ROOT/llama.cpp"
 BACKEND=${1:-cpu}
-case "$BACKEND" in cpu|metal|cuda) ;; *) echo "Unknown llama backend: $BACKEND" >&2; exit 1 ;; esac
+case "$BACKEND" in cpu|metal|cuda|vulkan) ;; *) echo "Unknown llama backend: $BACKEND" >&2; exit 1 ;; esac
 if [[ -d "$LLAMA_ROOT" && ! -d "$LLAMA_ROOT/.git" ]]; then
     echo "Existing archive-based llama.cpp is obsolete; preserving it before replacement."
     mv "$LLAMA_ROOT" "$PROJECT_ROOT/llama.cpp.backup.$(date +%s)"
@@ -34,6 +34,8 @@ if [[ "$BACKEND" == metal ]]; then
     CMAKE_ARGS+=(-DGGML_METAL=ON)
 elif [[ "$BACKEND" == cuda ]]; then
     CMAKE_ARGS+=(-DGGML_CUDA=ON)
+elif [[ "$BACKEND" == vulkan ]]; then
+    CMAKE_ARGS+=(-DGGML_VULKAN=ON)
 fi
 # Docker images are built without the target GPU/CPU: avoid "native" targets.
 if [[ "${LLAMA_PORTABLE_BUILD:-0}" == 1 ]]; then

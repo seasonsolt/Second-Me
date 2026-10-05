@@ -125,6 +125,8 @@ def test_port_probe_reports_conflict_without_touching_processes(local_service, m
     ("cuda", "Linux", True, True, "999"),
     ("cuda", "Linux", False, True, "0"),
     ("cuda", "Linux", True, False, "0"),
+    ("vulkan", "Linux", False, True, "999"),
+    ("vulkan", "Linux", False, False, "0"),
     ("cpu", "Linux", True, True, "0"),
 ])
 def test_offload_requires_matching_build_platform_and_user_choice(

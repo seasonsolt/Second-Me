@@ -248,10 +248,18 @@ install_graphrag() {
 build_llama() {
     log_section "BUILDING LLAMA.CPP"
     
-    local backend=cpu
-    if [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]; then
-        backend=metal
+    local backend=${LLAMA_BACKEND:-}
+    if [[ -z "$backend" ]]; then
+        backend=cpu
+        if [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]; then
+            backend=metal
+        elif command -v nvcc &>/dev/null; then
+            backend=cuda
+        elif command -v glslc &>/dev/null && command -v vulkaninfo &>/dev/null && vulkaninfo --summary &>/dev/null; then
+            backend=vulkan
+        fi
     fi
+    log_info "llama.cpp backend: $backend (override with LLAMA_BACKEND=cpu|metal|cuda|vulkan)"
     bash scripts/build_llama.sh "$backend"
 
 }
